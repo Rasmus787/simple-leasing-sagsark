@@ -256,6 +256,7 @@
       <button class="btn-new btn-new-sec" onclick="showKundebank()">👥 Kundebank</button>
       <button class="btn-new btn-new-sec" onclick="showBooking()">🔧 Booking værksted</button>
       <button class="btn-new btn-new-sec" onclick="showImport()">Import fra Excel / PDF</button>
+      <button class="btn-new btn-new-sec" onclick="opdaterApp()" style="margin-top:8px;background:rgba(255,255,255,0.08);font-size:11px;">🔄 Opdater app</button>
     </div>
     <div class="sidebar-section">Aktive sager</div>
     <div id="case-list"></div>
@@ -648,6 +649,27 @@ function loadCases() {
   renderEkonomiPanel();
   if (cases.length) setActive(cases[0].id);
   else renderMain();
+}
+
+function opdaterApp() {
+  if (!confirm('Hent seneste version fra GitHub og genstart appen?\n\nDine data gemmes og påvirkes ikke.')) return;
+  var btn = document.querySelector('button[onclick="opdaterApp()"]');
+  if (btn) { btn.textContent = '⏳ Opdaterer...'; btn.disabled = true; }
+  fetch('/api/update', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        alert('✓ App opdateret!\n\nOpdaterede filer:\n' + d.updated.join('\n') + '\n\nSiden genindlæses nu.');
+        setTimeout(function(){ location.reload(); }, 1000);
+      } else {
+        alert('Fejl: ' + d.error);
+        if (btn) { btn.textContent = '🔄 Opdater app'; btn.disabled = false; }
+      }
+    })
+    .catch(function(e) {
+      alert('Fejl: ' + e.message);
+      if (btn) { btn.textContent = '🔄 Opdater app'; btn.disabled = false; }
+    });
 }
 
 function save() {
