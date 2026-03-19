@@ -1,0 +1,13 @@
+{
+  "name": "Simple Leasing Sagsark",
+  "short_name": "Simple Leasing",
+  "description": "Sagsbehandlingssystem for Simple Leasing A/S",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1a18",
+  "theme_color": "#1a1a18",
+  "icons": [
+    { "src": "/AppIcon.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/AppIcon.png", "sizes": "192x192", "type": "image/png" }
+  ]
+}
