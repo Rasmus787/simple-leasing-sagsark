@@ -1249,9 +1249,9 @@ function renderExpiryPanel() {
       '</div>';
   }
   html += '</div></div>';
-  panel.innerHTML = htm
+  panel.innerHTML = html;
   var t1=el('eco-tab-maaned'); if(t1) t1.onclick=function(){ecoTab='maaned';renderEkonomiPanel();};
-  var t2=el('eco-tab-rullende'); if(t2) t2.onclick=function(){ecoTab='rullende';renderEkonomiPanel();};l;
+  var t2=el('eco-tab-rullende'); if(t2) t2.onclick=function(){ecoTab='rullende';renderEkonomiPanel();};
 }
 
 // ── RENDER MAIN ───────────────────────────────────────────────────────────────
@@ -2879,16 +2879,24 @@ function startKroneLytter() {
 }
 
 function behandlKroneData(d) {
-  // Find eksisterende sag via stel, regnr eller aftalenr
+  // Find eksisterende sag via stel, regnr, aftalenr eller kundenavn
   var match = null;
   if (d.stel) match = cases.find(function(c){ return c.stel && c.stel.trim().toUpperCase() === d.stel.trim().toUpperCase(); });
-  if (!match && d.regnr) match = cases.find(function(c){ return c.regnr && c.regnr.trim().toUpperCase() === d.regnr.trim().toUpperCase(); });
+  if (!match && d.regnr) match = cases.find(function(c){ return c.regnr && c.regnr.replace(/\s/g,'').toUpperCase() === d.regnr.replace(/\s/g,'').toUpperCase(); });
   if (!match && d.aftalenr) {
-    var dAft = d.aftalenr.trim();
+    var dAft = d.aftalenr.trim().replace(/^T/i,'');
     match = cases.find(function(c){
       if (!c.aftalenr) return false;
-      var cAft = c.aftalenr.trim();
-      return cAft === dAft || cAft === 'T'+dAft || 'T'+cAft === dAft;
+      return c.aftalenr.trim().replace(/^T/i,'') === dAft;
+    });
+  }
+  // Fallback: kundenavn match
+  if (!match && d.kunde) {
+    var kn = d.kunde.trim().toLowerCase();
+    match = cases.find(function(c){
+      if (!c.kunde) return false;
+      var ek = c.kunde.trim().toLowerCase();
+      return ek === kn || ek.indexOf(kn) !== -1 || kn.indexOf(ek) !== -1;
     });
   }
 
@@ -3771,11 +3779,44 @@ function importUdlob() {
     if (!first) first = c;
     imported++;
   });
-  // Tilføj alle som separate sager
-  toAdd.forEach(function(c) { cases.push(c); });
+  // Tilføj — men kun hvis sagen ikke allerede eksisterer
+  var added = 0, updated = 0;
+  toAdd.forEach(function(c) {
+    // Find eksisterende sag via stel, aftalenr eller kundenavn+bilmodel
+    var existing = null;
+    if (c.stel && c.stel.length > 5) {
+      existing = cases.find(function(e){ return e.stel && e.stel.trim().toUpperCase() === c.stel.trim().toUpperCase(); });
+    }
+    if (!existing && c.aftalenr) {
+      var af = c.aftalenr.replace(/^T/i,'');
+      existing = cases.find(function(e){ return e.aftalenr && e.aftalenr.replace(/^T/i,'') === af; });
+    }
+    if (!existing && c.kunde) {
+      var kn = c.kunde.trim().toLowerCase();
+      existing = cases.find(function(e){
+        if (!e.kunde) return false;
+        var ek = e.kunde.trim().toLowerCase();
+        return ek === kn || ek.indexOf(kn) !== -1 || kn.indexOf(ek) !== -1;
+      });
+    }
+    if (existing) {
+      // Opdater kun udløbsdato og periode hvis de er tomme
+      if (c.periodeslut && !existing.periodeslut) existing.periodeslut = c.periodeslut;
+      if (c.periodestart && !existing.periodestart) existing.periodestart = c.periodestart;
+      if (c.periode && !existing.periode) existing.periode = c.periode;
+      existing.updatedAt = new Date().toISOString();
+      updated++;
+      if (!first) first = existing;
+    } else {
+      cases.push(c);
+      added++;
+      if (!first) first = c;
+    }
+  });
+  imported = added + updated;
   save(); renderSidebar(); renderExpiryPanel(); closeImport();
   if (first) setActive(first.id);
-  alert(imported + ' sager importeret fra udløbsliste');
+  alert(added + ' nye sager importeret, ' + updated + ' eksisterende sager opdateret fra udløbsliste');
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
