@@ -253,13 +253,20 @@
       <button class="btn-new" onclick="newCase()">+ Ny sag</button>
       <button class="btn-new btn-new-sec" onclick="showBeregner()">🧮 Beregner</button>
       <button class="btn-new btn-new-sec" onclick="showProvision()">💰 Provision</button>
+      <button class="btn-new btn-new-sec" onclick="showForsikringOversigt()">🛡️ Forsikring</button>
       <button class="btn-new btn-new-sec" onclick="showKundebank()">👥 Kundebank</button>
       <button class="btn-new btn-new-sec" onclick="showBooking()">🔧 Booking værksted</button>
       <button class="btn-new btn-new-sec" onclick="showImport()">Import fra Excel / PDF</button>
+      <button class="btn-new btn-new-sec" onclick="hentAlDMR()" style="background:#1a3a2a;color:#9FE1CB;border-color:#1D9E75;">🚗 DMR opslag</button>
     </div>
     <div class="sidebar-section">Aktive sager</div>
+    <div style="padding:0 12px 8px;">
+      <input id="sag-search" type="text" placeholder="🔍 Søg kunde, bil, reg.nr..." 
+        oninput="filterSager(this.value)"
+        style="width:100%;box-sizing:border-box;padding:7px 10px;border:0.5px solid var(--border);border-radius:8px;font-size:12px;font-family:Georgia,serif;background:var(--gray-light);color:var(--text);">
+    </div>
     <div id="case-list"></div>
-    <div id="economi-panel"></div>
+
     <div class="user-badge">
       <div class="user-avatar" id="user-avatar">?</div>
       <div class="user-name" id="user-name">—</div>
@@ -269,7 +276,7 @@
   <div class="main" id="main-drop-area"
     ondragover="event.preventDefault();if(activeCase())document.getElementById('main-drop-area').style.outline='3px dashed var(--green)'"
     ondragleave="document.getElementById('main-drop-area').style.outline=''"
-    ondrop="event.preventDefault();document.getElementById('main-drop-area').style.outline='';var f=event.dataTransfer.files[0];if(f&&f.name.endsWith('.pdf'))uploadKontrakt(f)">
+    ondrop="event.preventDefault();document.getElementById('main-drop-area').style.outline='';var files=event.dataTransfer.files;if(files.length)dropFilesOnSag(files);">
     <div id="expiry-panel" style="display:none;"></div>
     <div id="main-content">
       <div class="empty-state">
@@ -324,7 +331,7 @@
     <div style="background:var(--gray-dark);padding:1.25rem 1.5rem;display:flex;justify-content:space-between;align-items:center;">
       <div>
         <div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:3px;">Simple Leasing</div>
-        <div style="font-size:18px;color:#fff;">Provision — overblik</div>
+        <div style="font-size:18px;color:#fff;">Samlet indtjening — overblik</div>
       </div>
       <button onclick="closeProvision()" style="background:rgba(255,255,255,0.1);border:none;color:#fff;padding:6px 14px;border-radius:var(--radius);cursor:pointer;font-size:13px;font-family:Georgia,serif;">Luk</button>
     </div>
@@ -464,6 +471,13 @@
           <input id="pdf-api-key" type="password" placeholder="sk-ant-..." style="font-size:13px;" oninput="localStorage.setItem('sl_api_key',this.value)">
           <div style="font-size:11px;color:var(--muted);margin-top:3px;">Hent din nøgle på console.anthropic.com · Koster ca. 1 øre pr. kontrakt</div>
         </div>
+        <div class="login-field" style="margin-bottom:10px;">
+          <label class="label">MotorAPI nøgle — DMR opslag (gemmes lokalt)</label>
+          <input id="motorapi-key" type="password" placeholder="Din motorapi.dk nøgle..." style="font-size:13px;"
+            oninput="localStorage.setItem('sl_motorapi_key',this.value)"
+            value="">
+          <div style="font-size:11px;color:var(--muted);margin-top:3px;">Hent gratis nøgle på motorapi.dk · 100 opslag/dag gratis</div>
+        </div>
         <div class="import-zone" id="pdf-drop-zone" onclick="document.getElementById('pdf-file-input').click()" ondragover="event.preventDefault();this.className='import-zone drag'" ondragleave="this.className='import-zone'" ondrop="handlePDFDrop(event)">
           <div class="import-zone-text">Slip Krone Kapital PDF her</div>
           <div class="import-zone-sub">Underskrevet leasingaftale</div>
@@ -551,7 +565,7 @@ var OKO_ITEMS = [
 ];
 
 var SELSKABER = ['Fleasing', 'Krone', 'Hessel', 'AL Finans'];
-var AFTALETYPER_LISTE = ['Hjemtagelse af ny bil', 'Forl\u00e6ngelse', 'Overtagelse / flytning', 'Stilstand'];
+var AFTALETYPER_LISTE = ['Hjemtagelse af ny bil', 'Forl\u00e6ngelse', 'Overtagelse / flytning', 'Stilstand', 'Split', 'Ny sag'];
 var AFTALETYPE = SELSKABER.concat(AFTALETYPER_LISTE);
 var STORAGE_KEY = 'sl_cases_v2'; // overskrives efter login med brugerspecifik nøgle
 var cases = [];
@@ -643,11 +657,27 @@ function loadCases() {
     cases = [];
     setSyncDot('error');
   }
+  // Genberegn forsikring på alle sager ved opstart
+  cases.forEach(function(c) {
+    if (!c.checks || !c.checks['r6'] || !c.pris) return;
+    var erStilstand = c.aftaletyper && c.aftaletyper.indexOf('Stilstand') !== -1;
+    if (!c.notes) c.notes = {};
+    c.notes['r6'] = calcForsikring(c.pris, c.periode, erStilstand);
+  });
   renderSidebar();
   renderExpiryPanel();
   renderEkonomiPanel();
-  if (cases.length) setActive(cases[0].id);
-  else renderMain();
+  // Start på den sag der sidst kom fra Krone — ellers første sag
+  var lastKroneId = localStorage.getItem('sl_last_krone_id');
+  var startSag = lastKroneId ? cases.find(function(c){ return c.id === lastKroneId; }) : null;
+  if (startSag) {
+    localStorage.removeItem('sl_last_krone_id');
+    setActive(startSag.id);
+  } else if (cases.length) {
+    setActive(cases[0].id);
+  } else {
+    renderMain();
+  }
 }
 
 
@@ -692,7 +722,7 @@ function blankCase() {
     periode: '', periodestart: '', periodeslut: '',
     pris: '', restvardi: '', saelger: '',
     aftaletyper: [], checks: checks, notes: notes, comments: comments,
-    kommentar: '', provFocus: '', provKrone: '', provSalg: '',
+    kommentar: '', provFocus: '', provKrone: '', provSalg: '', admSelskab: '', splitKunde: '', splitCvr: '', splitAdresse: '', splitTlf: '', splitEmail: '',
     udgifter: '', udgifterNote: '', overtagelseFra: '',
     momsdod: false,
     sidstSyn: '', naesteSyn: '', filer: [],
@@ -722,8 +752,30 @@ function deleteCase(id) {
   renderSidebar();
   renderExpiryPanel();
   renderEkonomiPanel();
-  if (cases.length) setActive(cases[0].id);
-  else renderMain();
+  // Start på den sag der sidst kom fra Krone — ellers første sag
+  var lastKroneId = localStorage.getItem('sl_last_krone_id');
+  var startSag = lastKroneId ? cases.find(function(c){ return c.id === lastKroneId; }) : null;
+  if (startSag) {
+    localStorage.removeItem('sl_last_krone_id');
+    setActive(startSag.id);
+  } else if (cases.length) {
+    setActive(cases[0].id);
+  } else {
+    renderMain();
+  }
+}
+
+
+function opdaterForsikringPris() {
+  var c = activeCase(); if (!c) return;
+  if (!c.pris) return;
+  // Genberegn kun hvis forsikring er via Købstæderne (r6 checked)
+  if (c.checks && c.checks['r6']) {
+    if (!c.notes) c.notes = {};
+    c.notes['r6'] = calcForsikring(c.pris, c.periode, c.aftaletyper && c.aftaletyper.indexOf('Stilstand') !== -1);
+    save();
+    rerenderChecklist();
+  }
 }
 
 function setActive(id) {
@@ -731,7 +783,7 @@ function setActive(id) {
   var c = activeCase();
   if (c && c.pris && (!c.notes || !c.notes['r6'])) {
     if (!c.notes) c.notes = {};
-    c.notes['r6'] = calcForsikring(c.pris);
+    c.notes['r6'] = calcForsikring(c.pris, c.periode, c.aftaletyper && c.aftaletyper.indexOf('Stilstand') !== -1);
   }
   renderSidebar();
   renderMain();
@@ -835,6 +887,8 @@ function progress(c) {
   var forsikringJa = c.checks && c.checks['r6'];
   all = all.filter(function(i) {
     if ((i.id === 'r4' || i.id === 'r4k') && (stilstand || forlangelse)) return false;
+    var admForlang = c.admForlang;
+    if (admForlang && (i.id === 'r1' || i.id === 'r2' || i.id === 'r3' || i.id === 'r4' || i.id === 'r4k' || i.id === 'r5')) return false;
     if (i.id === 'r11' && (stilstand || forlangelse)) return false;
     if (i.id === 'r5' && !hjemtagelse) return false;
     if ((i.id === 'r7' || i.id === 'r8') && !forsikringJa) return false;
@@ -867,6 +921,11 @@ function manglendePunkter(c) {
   RAS_ITEMS.filter(function(i) { return !i.isCode && !i.isTrackerRAS; }).forEach(function(i) {
     if ((i.id === 'r4' || i.id === 'r4k') && (stilstand || forlangelse)) return;
     if (i.id === 'r11' && (stilstand || forlangelse)) return;
+    // ADM Forlængelse: shade alle undtagen r6 (forsikring), r7 (friskade), r8 (vejhjælp)
+    var admF = c.admForlang;
+    if (admF && i.id !== 'r6' && i.id !== 'r7' && i.id !== 'r8' && i.id !== 'o1') {
+      shaded = true;
+    }
     if (i.id === 'r5' && !hjemtagelse) return;
     if ((i.id === 'r7' || i.id === 'r8') && !forsikringJa) return;
     if ((i.id === 'r9' || i.id === 'r10') && pris < 300000) return;
@@ -948,16 +1007,33 @@ function openBilinfoBooking() {
 }
 
 // ── RENDER CHECK ROW ──────────────────────────────────────────────────────────
-function calcForsikring(pris) {
+var FORSIKRING_SATSER = [
+  { max: 100000,    label: 'Under 100.000 kr',         aars: 6300  },
+  { max: 200000,    label: '100.000 - 199.999 kr',     aars: 7200  },
+  { max: 300000,    label: '200.000 - 299.999 kr',     aars: 8400  },
+  { max: 400000,    label: '300.000 - 399.999 kr',     aars: 10800 },
+  { max: 500000,    label: '400.000 - 499.999 kr',     aars: 12200 },
+  { max: 700000,    label: '500.000 - 699.999 kr',     aars: 13500 },
+  { max: 800000,    label: '700.000 - 799.999 kr',     aars: 15100 },
+  { max: 999999999, label: '800.000 kr og derover',    aars: 16800 }
+];
+
+function calcForsikringAars(pris) {
   var p = parseFloat((pris || '').replace(/\./g,'').replace(',','.')) || 0;
-  if (p < 100000)  return '6.300';
-  if (p < 200000)  return '7.200';
-  if (p < 300000)  return '8.400';
-  if (p < 400000)  return '10.800';
-  if (p < 500000)  return '12.200';
-  if (p < 700000)  return '13.500';
-  if (p < 800000)  return '15.100';
-  return '16.800';
+  for (var i = 0; i < FORSIKRING_SATSER.length; i++) {
+    if (p < FORSIKRING_SATSER[i].max) return FORSIKRING_SATSER[i].aars;
+  }
+  return FORSIKRING_SATSER[FORSIKRING_SATSER.length - 1].aars;
+}
+
+function calcForsikring(pris, periode, stilstand) {
+  // Beregn forsikring baseret på periode — dividér med 12 og gange med mdr
+  // Stilstand = 50% af normal pris
+  var aars = calcForsikringAars(pris);
+  if (stilstand) aars = Math.round(aars * 0.5);
+  var mdr = parseFloat(periode) || 12;
+  var beloeb = mdr < 12 ? Math.round(aars / 12 * mdr) : aars;
+  return String(beloeb).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 }
 
 
@@ -1002,6 +1078,27 @@ function renderCheckRow(c, item, tag) {
       (stilstand ? 'Stilstand' : 'Forl\u00e6ngelse') + '</span></div>';
   }
 
+  // ADM Forlæng: shade alt undtagen r6/r7/r8 i sælger-del og o6 i ADM-del
+  // Hvis bil over 300.000: r10 (tracker abonnement) er også aktiv
+  if (c.admForlang) {
+    var admBilPris = parseFloat((c.pris || '').replace(/\./g,'').replace(',','.')) || 0;
+    // Aktive ved ADM forlæng: forsikring (r6/r7/r8), tracker hvis over 300k (r9/r10), ADM indberetning (o6)
+    var admAktive = ['r6', 'r7', 'r8', 'o6'];
+    if (admBilPris >= 300000) {
+      admAktive.push('r9');
+      admAktive.push('r9_monteret');
+      admAktive.push('r9_skal');
+      admAktive.push('r10');
+    }
+    if (admAktive.indexOf(item.id) === -1) {
+      return '<div class="check-row" id="cr-' + id + '" style="opacity:0.25;">' +
+        '<input type="checkbox" disabled>' +
+        '<span class="tag tag-' + tag + '">' + tagLabel + '</span>' +
+        '<span class="check-label" style="text-decoration:line-through;">' + item.label + '</span>' +
+        '<span style="font-size:11px;color:var(--muted);margin-left:auto;">ADM Forl.</span></div>';
+    }
+  }
+
   // o3: kun ved hjemtagelse
   if (item.id === 'o3' && !hjemtagelse) {
     return '<div class="check-row" id="cr-' + id + '" style="opacity:0.3;">' +
@@ -1025,12 +1122,15 @@ function renderCheckRow(c, item, tag) {
     var skalMonteres = c.checks && c.checks[id + '_skal'];
     var bM = 'font-size:12px;padding:4px 12px;border-radius:20px;cursor:pointer;border:1.5px solid ' + (monteret ? 'var(--green);background:var(--green);color:#fff;' : 'var(--border);background:#fff;');
     var bS = 'font-size:12px;padding:4px 12px;border-radius:20px;cursor:pointer;border:1.5px solid ' + (skalMonteres ? 'var(--amber);background:var(--amber-light);color:var(--amber-dark);' : 'var(--border);background:#fff;');
+    var trackerCommentBtn = '<button class="check-comment-btn' + (hasComment ? ' has-comment' : '') + '" onclick="toggleComment(\'' + id + '\')">\uD83D\uDCAC</button>' +
+      '<div class="check-comment-wrap" id="ccw-' + id + '" style="display:' + (hasComment ? 'flex' : 'none') + ';">' +
+      '<input class="check-comment-input" placeholder="Kommentar..." value="' + commentVal + '" oninput="updComment(\'' + id + '\',this.value)" id="cc-' + id + '"></div>';
     return '<div class="check-row" id="cr-' + id + '" style="flex-wrap:wrap;gap:6px;">' +
       '<button style="' + bM + '" onclick="updCheck(\'' + id + '_monteret\',true);updCheck(\'' + id + '_skal\',false);toggleCheck(\'' + id + '\',true);rerenderChecklist()">Er monteret</button>' +
       '<button style="' + bS + '" onclick="updCheck(\'' + id + '_skal\',true);updCheck(\'' + id + '_monteret\',false);toggleCheck(\'' + id + '\',false);rerenderChecklist()">Skal monteres</button>' +
       '<span class="tag tag-' + tag + '">' + tagLabel + '</span>' +
       '<span class="check-label">Tracker — satcar.dk</span>' +
-      commentBtn + '</div>';
+      trackerCommentBtn + '</div>';
   }
   if (item.id === 'o6' && !forsikringAfkrydset) {
     return '<div class="check-row" id="cr-' + id + '" style="opacity:0.3;">' +
@@ -1064,7 +1164,7 @@ function renderCheckRow(c, item, tag) {
       '<span class="check-label">Forsikring via K\u00f8bst.?</span>' +
       '<button style="' + bJa + '" onclick="toggleCheck(\'' + id + '\',true);updCheck(\'r6_nej\',false);rerenderChecklist()">Ja</button>' +
       '<button style="' + bNej + '" onclick="toggleCheck(\'' + id + '\',false);updCheck(\'r6_nej\',true);rerenderChecklist()">Nej</button>' +
-      (jaChecked ? '<input class="note-input" placeholder="Pris kr/\u00e5r" value="' + noteVal + '" style="width:110px;" oninput="updNote(\'' + id + '\',this.value)">' : '') +
+      (jaChecked ? '<input class="note-input" placeholder="Pris kr" value="' + (noteVal || calcForsikring(c.pris, c.periode, c.aftaletyper && c.aftaletyper.indexOf('Stilstand') !== -1)) + '" style="width:110px;" oninput="updNote(\'' + id + '\',this.value)">' : '') +
       (nejChecked ? '<input class="note-input" placeholder="Forsikringsselskab..." value="' + andetSelskab + '" style="width:200px;" oninput="updNote(\'r6_andet\',this.value)">' : '') +
       commentBtn + '</div>';
   }
@@ -1111,14 +1211,21 @@ function renderCheckRow(c, item, tag) {
     }
     var erMonteret = c.checks && c.checks[id + '_monteret'];
     var skalMonteres = c.checks && c.checks[id + '_skal'];
-    var bM = 'font-size:12px;padding:4px 12px;border-radius:20px;cursor:pointer;border:1.5px solid ' + (erMonteret ? 'var(--green);background:var(--green);color:#fff;' : 'var(--border);background:#fff;');
+    var trackerPris = (c.notes && c.notes[id + '_pris']) || '2800';
+    var bM = 'font-size:12px;padding:4px 12px;border-radius:20px;cursor:pointer;border:1.5px solid ' + (erMonteret ? 'var(--green);background:var(--green);color:#fff;font-weight:700;' : 'var(--border);background:#fff;');
     var bS = 'font-size:12px;padding:4px 12px;border-radius:20px;cursor:pointer;border:1.5px solid ' + (skalMonteres ? 'var(--amber);background:var(--amber-light);color:var(--amber-dark);' : 'var(--border);background:#fff;');
     var rowBg = (!erMonteret && !skalMonteres) ? 'background:var(--red-light);border-left:3px solid var(--red);padding:6px;' : '';
+    var prisDropdown = erMonteret ? '' : '<select style="font-size:12px;padding:3px 6px;border:1px solid var(--border);border-radius:6px;margin-left:4px;cursor:pointer;" onchange="var c2=activeCase();if(!c2.notes)c2.notes={};c2.notes[\'' + id + '_pris\']=this.value;save();">' +
+      ['2800','3200','3500','4000','4500','5000'].map(function(p) {
+        return '<option value="' + p + '"' + (trackerPris === p ? ' selected' : '') + '>' + p + ' kr</option>';
+      }).join('') +
+      '</select>';
     return '<div class="check-row" id="cr-' + id + '" style="flex-wrap:wrap;gap:6px;' + rowBg + '">' +
       '<span class="tag" style="background:#FCEBEB;color:var(--red-dark);">' + tagLabel + '</span>' +
-      '<span class="check-label">Tracker (2.800 + moms)</span>' +
+      '<span class="check-label">Tracker</span>' +
+      prisDropdown +
       '<button style="' + bM + '" onclick="updCheck(\'' + id + '_monteret\',true);updCheck(\'' + id + '_skal\',false);toggleCheck(\'' + id + '\',true);rerenderChecklist()">MONTERET</button>' +
-      (erMonteret ? '' : '<button style="' + bS + '" onclick="updCheck(\'' + id + '_skal\',true);updCheck(\'' + id + '_monteret\',false);toggleCheck(\'' + id + '\',false);rerenderChecklist()">Skal monteres</button>') +
+      '<button style="' + bS + '" onclick="updCheck(\'' + id + '_skal\',true);updCheck(\'' + id + '_monteret\',false);toggleCheck(\'' + id + '\',false);rerenderChecklist()">Skal monteres</button>' +
       commentBtn + '</div>';
   }
 
@@ -1153,17 +1260,23 @@ function renderAftaletyper(c) {
       (c.aftaletyper.indexOf(a) !== -1 ? 'checked' : '') +
       ' onchange="toggleAftaletype(\'' + a.replace(/'/g, "\\'") + '\',this.checked)" style="width:14px;height:14px;"> ' + a + '</label>';
   }
+  var erSplit = c.aftaletyper.indexOf('Split') !== -1;
   var html =
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">' +
     '<div>' +
     '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);margin-bottom:8px;">Leasingselskab</div>' +
     '<div class="check-types" style="flex-direction:column;gap:6px;">' +
     SELSKABER.map(makeCheck).join('') +
     '</div></div>' +
     '<div>' +
+    '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);margin-bottom:8px;">Leasingtype</div>' +
+    '<div class="check-types" style="flex-direction:column;gap:6px;">' +
+    makeCheck('Split') +
+    '</div></div>' +
+    '<div>' +
     '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);margin-bottom:8px;">Aftaletype</div>' +
     '<div class="check-types" style="flex-direction:column;gap:6px;">' +
-    AFTALETYPER_LISTE.map(makeCheck).join('') +
+    AFTALETYPER_LISTE.filter(function(a){ return a !== 'Split'; }).map(makeCheck).join('') +
     '</div></div>' +
     '</div>';
   if (c.aftaletyper.indexOf('Overtagelse / flytning') !== -1) {
@@ -1176,10 +1289,282 @@ function renderAftaletyper(c) {
       '<label class="label" style="flex-shrink:0;">Gammelt sagsnummer:</label>' +
       '<input value="' + esc(c.gammeltSagnr || '') + '" placeholder="Sagnr..." oninput="upd(\'gammeltSagnr\',this.value)" style="max-width:180px;"></div>';
   }
+  // Split-leasing: privat leasingtager
+  if (erSplit) {
+    html += '<div style="margin-top:14px;padding:14px;background:#F0F9FF;border-radius:8px;border:1px solid #BAE6FD;">' +
+      '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#0369A1;margin-bottom:10px;">\uD83D\uDC64 Privat leasingtager (Split)</div>' +
+      '<div class="grid3" style="gap:8px;">' +
+      '<div class="field"><label class="label">Navn</label><input value="' + esc(c.splitKunde || '') + '" placeholder="Fulde navn" oninput="upd(\'splitKunde\',this.value)"></div>' +
+      '<div class="field"><label class="label">Adresse</label><input value="' + esc(c.splitAdresse || '') + '" placeholder="Vejnavn 1" oninput="upd(\'splitAdresse\',this.value)"></div>' +
+      '<div class="field"><label class="label">Telefon</label><input value="' + esc(c.splitTlf || '') + '" placeholder="Tlf." oninput="upd(\'splitTlf\',this.value)"></div>' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">' +
+      '<div class="field"><label class="label">Email</label><input value="' + esc(c.splitEmail || '') + '" placeholder="email@..." oninput="upd(\'splitEmail\',this.value)"></div>' +
+      '<div class="field"><label class="label">Postnr. / By</label><input value="' + esc(c.splitPostby || '') + '" placeholder="2100 København" oninput="upd(\'splitPostby\',this.value)"></div>' +
+      '</div>' +
+      '</div>';
+  }
+
+  // ADM Forlæng sektion
+  html += '<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:' + (c.admForlang ? '10px' : '0') + ';">' +
+    '<span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);">ADM Forl\u00e6ngelse</span>' +
+    (c.admForlang
+      ? '<button onclick="fjernAdmForlang()" style="font-size:11px;background:none;border:1px solid #F59E0B;color:#7C4A00;padding:3px 10px;border-radius:6px;cursor:pointer;">Fortryd</button>'
+      : '<button onclick="visAdmForlangModal()" style="background:#FFF3E0;color:#7C4A00;border:1px solid #F59E0B;border-radius:6px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:Georgia,serif;">+ ADM Forl\u00e6ng</button>') +
+    '</div>';
+  if (c.admForlang) {
+    html += '<div style="background:#FFF3E0;border-radius:8px;padding:10px 14px;">' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:4px;">' +
+      '<div>' +
+        '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);margin-bottom:6px;">Leasingselskab</div>' +
+        '<div style="display:flex;flex-direction:column;gap:4px;">' +
+        SELSKABER.map(function(s) {
+          return '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;">' +
+            '<input type="radio" name="adm-selskab" value="' + s + '" ' +
+            ((c.admSelskab || c.aftaletyper.filter(function(a){return SELSKABER.indexOf(a)!==-1;})[0]) === s ? 'checked' : '') +
+            ' onchange="upd(\'admSelskab\',\'' + s + '\')" style="width:13px;height:13px;"> ' + s + '</label>';
+        }).join('') +
+        '</div>' +
+      '</div>' +
+      '<div>' +
+        '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);margin-bottom:6px;">Forl\u00e6ngelse</div>' +
+        '<div style="font-size:13px;color:#7C4A00;font-weight:600;">' + (c.admForlangMdr||'?') + ' mdr.</div>' +
+        '<div style="font-size:12px;color:var(--muted);margin-top:4px;">Ny slutdato: ' + (c.periodeslut ? formatDate(c.periodeslut) : '\u2014') + '</div>' +
+        (c.admForlangForsikring ? '<div style="font-size:12px;color:#7C4A00;margin-top:4px;font-weight:600;">Forsikring: ' + formatKr(c.admForlangForsikring) + ' kr</div>' : '') +
+      '</div>' +
+      '</div></div>';
+  }
+  html += '</div>';
   return html;
 }
 
 // ── RENDER SIDEBAR ────────────────────────────────────────────────────────────
+
+function hentDMR() {
+  var c = activeCase();
+  if (!c) return;
+  var soeg = c.stel || c.regnr;
+  if (!soeg) { alert('Ingen stel- eller reg.nummer på sagen'); return; }
+
+  var btn = el('btn-bilinfo');
+  if (btn) { btn.textContent = '⏳ Henter...'; btn.disabled = true; }
+
+  var body = c.stel ? {stel: c.stel} : {regnr: c.regnr};
+  body.apiKey = localStorage.getItem('sl_motorapi_key') || '';
+  if (!body.apiKey) {
+    showKroneDataBanner('Ingen MotorAPI nøgle — gem den under Import → Krone Kapital PDF', 'red');
+    if (btn) { btn.textContent = '🚗 DMR'; btn.disabled = false; }
+    return;
+  }
+  fetch('/api/dmr', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(result) {
+    if (result.error) throw new Error(result.error);
+    overfoerDMRData(result);
+  })
+  .catch(function(e) {
+    showKroneDataBanner('DMR fejl: ' + e.message, 'red');
+  })
+  .finally(function() {
+    if (btn) { btn.textContent = '🚗 DMR'; btn.disabled = false; }
+  });
+}
+
+function dmrDato(s) {
+  // dd-mm-yyyy -> yyyy-mm-dd
+  if (!s) return '';
+  var p = s.split('-');
+  if (p.length === 3 && p[0].length === 2) return p[2] + '-' + p[1] + '-' + p[0];
+  return s;
+}
+
+function parseDMRSide(txt) {
+  var result = {};
+  // Reg.nr
+  var rnM = txt.match(/Registreringsnummer:\s*([A-ZÆØÅ]{2}\d{5})/);
+  if (rnM) result.regnr = rnM[1];
+  // Første reg dato
+  var frM = txt.match(/Første registrerings\u00acdato:\s*(\d{2}-\d{2}-\d{4})/);
+  if (!frM) frM = txt.match(/Første registreringsdato:\s*(\d{2}-\d{2}-\d{4})/);
+  if (frM) result.forsteReg = dmrDato(frM[1]);
+  // Farve
+  var fvM = txt.match(/Farve:\s*([^\n]+)/);
+  if (fvM) result.farve = fvM[1].trim();
+  return result;
+}
+
+function overfoerDMRData(result) {
+  var c = activeCase();
+  if (!c) return;
+  var updated = 0;
+  // DMR er kilden til sandhed — overskriv ALTID alle felter der findes i DMR
+  if (result.regnr)      { c.regnr     = result.regnr;     updated++; }
+  if (result.stel)       { c.stel      = result.stel;      updated++; }
+  if (result.forsteReg)  { c.forsteReg = result.forsteReg; updated++; }
+  if (result.farve)      { c.farve     = result.farve;     updated++; }
+  if (result.bilmodel)   { c.bilmodel  = result.bilmodel;  updated++; }
+  if (result.synSenest)  { c.naesteSyn = result.synSenest; updated++; }
+  if (result.forsikring) { c.forsikringsselskab = result.forsikring; updated++; }
+  if (result.leasingFra) { c.periodestart = result.leasingFra; updated++; }
+  if (result.leasingTil) { c.periodeslut  = result.leasingTil; updated++; }
+  if (updated > 0) {
+    save(); renderMain(); renderSidebar(); renderExpiryPanel();
+    showKroneDataBanner('\u2714 DMR: ' + updated + ' felter opdateret og rettet', 'green');
+  } else {
+    showKroneDataBanner('DMR: Ingen data fundet', 'amber');
+  }
+}
+
+
+function aabDMR() {
+  var c = activeCase();
+  if (!c) return;
+  var soeg = c.stel || c.regnr;
+  if (!soeg) { showKroneDataBanner('Ingen stel- eller reg.nummer på sagen', 'red'); return; }
+
+  var linkBtn = el('btn-dmr-link');
+  if (linkBtn) { linkBtn.textContent = '⏳ Henter...'; linkBtn.disabled = true; }
+
+  // Ryd gammel result
+  localStorage.removeItem('sl_dmr_result');
+
+  // Sæt søgedata i sessionStorage via en midlertidig side
+  // Åbn DMR med sessionStorage sat via URL parameter
+  var erStel = c.stel ? '1' : '0';
+  var dmrUrl = 'https://motorregister.skat.dk/dmr-kerne/koeretoejdetaljer/visKoeretoej?execution=e1s1';
+  var w = window.open(dmrUrl, '_dmr_auto');
+
+  // Vent til vinduet er klar og sæt sessionStorage
+  var initTries = 0;
+  var initIv = setInterval(function() {
+    initTries++;
+    if (initTries > 30) { clearInterval(initIv); return; }
+    try {
+      if (w.closed) { clearInterval(initIv); return; }
+      // Forsøg at sætte sessionStorage på DMR-siden
+      w.sessionStorage.setItem('_dmr_soeg', soeg);
+      w.sessionStorage.setItem('_dmr_er_stel', erStel);
+      clearInterval(initIv);
+    } catch(e) {}
+  }, 200);
+
+  // Poll localStorage for resultat fra extension
+  var pollTries = 0;
+  var pollIv = setInterval(function() {
+    pollTries++;
+    if (pollTries > 150) { // Max 45 sek
+      clearInterval(pollIv);
+      if (linkBtn) { linkBtn.textContent = '?? Åbn DMR'; linkBtn.disabled = false; }
+      showKroneDataBanner('DMR timeout', 'red');
+      return;
+    }
+    var raw = localStorage.getItem('sl_dmr_result');
+    if (!raw) return;
+    clearInterval(pollIv);
+    localStorage.removeItem('sl_dmr_result');
+    try {
+      var result = JSON.parse(raw);
+      overfoerDMRData(result);
+    } catch(e) {
+      showKroneDataBanner('DMR fejl: ' + e.message, 'red');
+    }
+    if (linkBtn) { linkBtn.textContent = '?? Åbn DMR'; linkBtn.disabled = false; }
+  }, 300);
+}
+
+
+function hentAlDMR() {
+  var c = activeCase();
+  if (!c) return;
+  var soeg = c.stel || c.regnr;
+  if (!soeg) { showKroneDataBanner('Ingen stel- eller reg.nummer', 'red'); return; }
+
+  var btn = el('btn-bilinfo');
+  if (btn) { btn.textContent = '⏳ Henter...'; btn.disabled = true; }
+
+  var dmrResult = {};
+  var motorDone = false;
+  var dmrDone = false;
+
+  function finish() {
+    if (!motorDone || !dmrDone) return;
+    overfoerDMRData(dmrResult);
+    if (btn) { btn.textContent = '?? DMR'; btn.disabled = false; }
+  }
+
+  // 1) MotorAPI stamdata
+  var apiKey = localStorage.getItem('sl_motorapi_key') || '';
+  if (apiKey) {
+    fetch('/api/dmr', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({stel: c.stel, regnr: c.regnr, apiKey: apiKey})
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      if (d.regnr)     dmrResult.regnr     = d.regnr;
+      if (d.farve)     dmrResult.farve     = d.farve;
+      if (d.bilmodel)  dmrResult.bilmodel  = d.bilmodel;
+      if (d.forsteReg) dmrResult.forsteReg = d.forsteReg;
+      if (d.stel)      dmrResult.stel      = d.stel;
+      motorDone = true; finish();
+    })
+    .catch(function() { motorDone = true; finish(); });
+  } else {
+    motorDone = true;
+  }
+
+  // 2) DMR via extension — åbn synligt så brugeren kan se det sker
+  localStorage.removeItem('sl_dmr_result');
+
+  // Send besked til extension background via runtime message
+  if (window.chrome && chrome.runtime) {
+    try {
+      chrome.runtime.sendMessage({type: 'OPEN_DMR', soeg: soeg, erStel: !!c.stel});
+    } catch(e) {}
+  }
+
+  // Poll localStorage for resultat
+  var pollTries = 0;
+  var pollIv = setInterval(function() {
+    pollTries++;
+    if (pollTries > 200) {
+      clearInterval(pollIv);
+      dmrDone = true; finish();
+      return;
+    }
+    var raw = localStorage.getItem('sl_dmr_result');
+    if (!raw) return;
+    clearInterval(pollIv);
+    localStorage.removeItem('sl_dmr_result');
+    try {
+      var d = JSON.parse(raw);
+      if (d.regnr)      dmrResult.regnr      = d.regnr;
+      if (d.forsteReg)  dmrResult.forsteReg  = d.forsteReg;
+      if (d.farve)      dmrResult.farve      = d.farve;
+      if (d.synSenest)  dmrResult.synSenest  = d.synSenest;
+      if (d.forsikring) dmrResult.forsikring = d.forsikring;
+      if (d.leasingFra) dmrResult.leasingFra = d.leasingFra;
+      if (d.leasingTil) dmrResult.leasingTil = d.leasingTil;
+    } catch(e2) {}
+    dmrDone = true; finish();
+  }, 300);
+}
+
+function filterSager(q) {
+  q = (q||'').toLowerCase().trim();
+  var items = document.querySelectorAll('#case-list .case-item');
+  items.forEach(function(el) {
+    var txt = el.textContent.toLowerCase();
+    el.style.display = (!q || txt.indexOf(q) !== -1) ? '' : 'none';
+  });
+}
+
 function renderSidebar() {
   // Sorter: udløber snarest øverst, ingen dato sidst
   var sorted = cases.slice().sort(function(a, b) {
@@ -1251,6 +1636,17 @@ function renderMain() {
 
   var html = '';
 
+  // ADM Forlængelse banner
+  if (c.admForlang) {
+    html += '<div style="background:#FFF3E0;border:1.5px solid #F59E0B;border-radius:var(--radius-lg);padding:12px 16px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">' +
+      '<div>' +
+        '<span style="font-size:13px;font-weight:700;color:#7C4A00;">ADM Forlængelse — ' + (c.admForlangMdr || '?') + ' mdr.</span>' +
+        (c.admForlangForsikring ? '<span style="font-size:13px;color:#7C4A00;margin-left:12px;">Forsikring at fakturere: <strong>' + formatKr(c.admForlangForsikring) + ' kr</strong></span>' : '') +
+      '</div>' +
+      '<button onclick="fjernAdmForlang()" style="font-size:11px;background:none;border:1px solid #F59E0B;color:#7C4A00;padding:3px 10px;border-radius:6px;cursor:pointer;">Fortryd</button>' +
+    '</div>';
+  }
+
   // Header
   html += '<div class="main-header">' +
     '<div>' +
@@ -1258,7 +1654,8 @@ function renderMain() {
     '<div class="main-subtitle">' + (c.bilmodel || '') + (c.regnr ? ' &middot; ' + c.regnr : '') + (c.periodeslut ? ' &middot; Udl\u00f8ber ' + formatDate(c.periodeslut) : '') + '</div>' +
     '</div>' +
     '<div class="header-actions">' +
-    (c.periodeslut ? '<button class="btn" onclick="forlængSag()" title="' + (pct < 100 ? 'Mangler: ' + manglendePunkter(c).join(', ') : 'Klar til forl\u00e6ngelse') + '" style="background:' + (pct < 100 ? 'var(--gray-light);color:var(--muted);border-color:var(--border);' : 'var(--blue-light);color:var(--blue-dark);border-color:var(--blue);font-weight:600;') + '">Forl\u00e6ng' + (pct < 100 ? ' (' + pct + '%)' : '') + '</button>' : '') +
+    (c.periodeslut ? '<button class="btn" onclick="forlængSag()" title="' + (pct < 100 ? 'Mangler: ' + manglendePunkter(c).join(', ') : 'Klar til forlængelse') + '" style="background:' + (pct < 100 ? 'var(--gray-light);color:var(--muted);border-color:var(--border);' : 'var(--blue-light);color:var(--blue-dark);border-color:var(--blue);font-weight:600;') + '">Forlæng' + (pct < 100 ? ' (' + pct + '%)' : '') + '</button>' : '') +
+
     '<button class="btn" onclick="visKroneHentModal()" style="background:#FFF3E0;color:#7C4A00;border-color:#F59E0B;" title="Hent data fra Krone Connect">🔗 Krone</button>' +
     '<button class="btn" onclick="exportExcel()" style="background:var(--green-light);color:var(--green-dark);border-color:#9FE1CB;">\uD83D\uDCCA Excel</button>' +
     '<button class="btn" onclick="document.getElementById(\'sag-pdf-input\').click()" style="background:var(--blue-light);color:var(--blue-dark);border-color:var(--blue);">\uD83D\uDCC4 Kontrakt</button>' +
@@ -1292,8 +1689,13 @@ function renderMain() {
     '<div class="field"><label class="label">Reg.nummer</label><input id="f-regnr" value="' + esc(c.regnr) + '" placeholder="AB12345" oninput="upd(\'regnr\',this.value);refreshTjek()"></div>' +
     '</div>' +
     '<div class="grid3" style="margin-bottom:10px;">' +
-    '<div class="field"><label class="label">Leasingperiode (mdr)</label><input id="f-periode" value="' + esc(c.periode) + '" placeholder="12" oninput="upd(\'periode\',this.value);autoEndDate()"></div>' +
-    '<div class="field"><label class="label">Bilens pris ' + (c.momsdod ? '<strong style="color:var(--amber-dark);">inkl. moms</strong>' : 'ekskl. moms') + ' (kr)</label><input id="f-pris" value="' + esc(c.pris || '') + '" placeholder="' + (c.momsdod ? '288.750' : '231.000') + '" oninput="upd(\'pris\',this.value);rerenderChecklist()"></div>' +
+    '<div class="field"><label class="label">Første reg. dato</label><input type="date" value="' + esc(c.forsteReg || '') + '" oninput="upd(\'forsteReg\',this.value)"></div>' +
+    '<div class="field"><label class="label">Farve</label><input value="' + esc(c.farve || '') + '" placeholder="Sort, Sølv..." oninput="upd(\'farve\',this.value)"></div>' +
+    '<div class="field"><label class="label">Km stand</label><input value="' + esc(c.km || '') + '" placeholder="45.000" oninput="upd(\'km\',this.value)"></div>' +
+    '</div>' +
+    '<div class="grid3" style="margin-bottom:10px;">' +
+    '<div class="field"><label class="label">Leasingperiode (mdr)</label><input id="f-periode" value="' + esc(c.periode) + '" placeholder="12" oninput="upd(\'periode\',this.value);autoEndDate();opdaterForsikringPris()"></div>' +
+    '<div class="field"><label class="label">Bilens pris ' + (c.momsdod ? '<strong style="color:var(--amber-dark);">inkl. moms</strong>' : 'ekskl. moms') + ' (kr)</label><input id="f-pris" value="' + esc(c.pris || '') + '" placeholder="' + (c.momsdod ? '288.750' : '231.000') + '" oninput="upd(\'pris\',this.value);rerenderChecklist();opdaterForsikringPris()"></div>' +
     '<div class="field"><label class="label">Restv\u00e6rdi ' + (c.momsdod ? '<strong style="color:var(--amber-dark);">inkl. moms</strong>' : 'ekskl. moms') + ' (kr)</label><input id="f-restvardi" value="' + esc(c.restvardi || '') + '" placeholder="' + (c.momsdod ? '256.250' : '205.000') + '" oninput="upd(\'restvardi\',this.value)"></div>' +
     '<div class="field"><label class="label">Moms</label>' +
     '<div style="display:flex;gap:8px;margin-top:4px;">' +
@@ -1330,8 +1732,9 @@ function renderMain() {
 
   // Syn
   html += '<div class="card"><div class="card-title" style="display:flex;justify-content:space-between;align-items:center;">Syn' +
-    '<button class="btn btn-tjek" id="btn-bilinfo" ' + (!c.stel && !c.regnr ? 'disabled' : '') + ' onclick="openBilinfo()" style="font-size:11px;padding:4px 10px;">Åbn tjekbil</button>' +
-    '</div>' +
+    '<div style="display:flex;gap:6px;">' +
+    '<button class="btn btn-tjek" id="btn-bilinfo" ' + (!c.stel && !c.regnr ? 'disabled' : '') + ' onclick="hentAlDMR()" style="font-size:11px;padding:4px 10px;">\uD83D\uDE97 DMR</button>' +
+    '</div></div>' +
     '<div class="grid2">' +
     '<div class="field"><label class="label">N\u00e6ste syn</label><input id="f-naeste-syn" value="' + esc(c.naesteSyn || '') + '" placeholder="dd.mm.\u00e5\u00e5\u00e5\u00e5" oninput="upd(\'naesteSyn\',this.value)"></div>' +
     '</div></div>';
@@ -1354,7 +1757,10 @@ function renderMain() {
 
   // Fil-mappe
   var sagFiler = c.filer || [];
-  html += '<div class="card" id="sag-filer-card">' +
+  html += '<div class="card" id="sag-filer-card" ' +
+    'ondragover="event.preventDefault();this.style.outline=\'2px dashed var(--green)\'" ' +
+    'ondragleave="this.style.outline=\'\'" ' +
+    'ondrop="event.preventDefault();this.style.outline=\'\';dropFilesOnSag(event.dataTransfer.files)">' +
     '<div class="card-title" style="display:flex;justify-content:space-between;align-items:center;">Filer p\u00e5 sagen' +
     '<label style="font-size:12px;padding:3px 10px;border:0.5px solid var(--border);border-radius:20px;cursor:pointer;background:var(--gray-light);color:var(--gray-dark);font-weight:400;">' +
     '+ Tilf\u00f8j filer<input type="file" multiple accept="image/*,.pdf,.xlsx,.docx" style="display:none" onchange="tilfoejFiler(this.files)"></label>' +
@@ -1378,7 +1784,7 @@ function renderMain() {
   var minProvPct = parseFloat(c.minProvPct || 40);
   var minProv = netto * minProvPct / 100;
   html += '<div class="card" style="border-color:#9FE1CB;">' +
-    '<div class="card-title" style="color:var(--green-dark);">\u00d8konomi p\u00e5 sagen</div>' +
+    '<div class="card-title" style="color:var(--green-dark);">Samlet indtjening p\u00e5 sagen</div>' +
     '<div class="grid3" style="margin-bottom:10px;">' +
     '<div class="field"><label class="label">Provision (kr)</label><input id="f-prov-focus" value="' + esc(c.provFocus || '') + '" placeholder="0" type="number" min="0" oninput="upd(\'provFocus\',this.value);renderEkonomiPanel()" style="border-color:#9FE1CB;"></div>' +
     '<div class="field"><label class="label">Fortjeneste ved salg (kr)</label><input id="f-prov-salg" value="' + esc(c.provSalg || '') + '" placeholder="0" type="number" min="0" oninput="upd(\'provSalg\',this.value);renderEkonomiPanel()" style="border-color:#9FE1CB;"></div>' +
@@ -1386,23 +1792,18 @@ function renderMain() {
     '</div>' +
     '<div class="field" style="margin-bottom:10px;"><label class="label">Udgifter beskrivelse</label><input id="f-udgifter-note" value="' + esc(c.udgifterNote || '') + '" placeholder="Transport, annoncering..." oninput="upd(\'udgifterNote\',this.value)"></div>' +
     '<div style="background:var(--green-light);border-radius:var(--radius);padding:10px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
-    '<span style="font-size:13px;color:var(--green-dark);">Netto p\u00e5 denne sag</span>' +
+    '<span style="font-size:13px;color:var(--green-dark);">Samlet indtjening</span>' +
     '<span style="font-size:18px;font-weight:500;color:var(--green-dark);" id="sag-netto">' + formatKr(netto) + '</span></div>' +
-    '<div style="background:#f0f9f5;border-radius:var(--radius);padding:8px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
+    '<div style="background:#f0f9f5;border-radius:var(--radius);padding:8px 14px;display:flex;justify-content:space-between;align-items:center;">' +
     '<div style="display:flex;align-items:center;gap:8px;">' +
-    '<span style="font-size:12px;color:var(--green-dark);">Salgsprovision</span>' +
+    '<span style="font-size:12px;color:var(--green-dark);font-weight:600;">Min l\u00f8n</span>' +
     '<select style="font-size:12px;padding:2px 6px;border-color:#9FE1CB;width:auto;" onchange="upd(\'minProvPct\',this.value);renderEkonomiPanel()">' +
     [20,25,30,35,40].map(function(p) { return '<option value="' + p + '"' + (minProvPct === p ? ' selected' : '') + '>' + p + '%</option>'; }).join('') +
     '</select>' +
-    '<span style="font-size:12px;color:var(--muted);">af al fortjeneste</span>' +
+    '<span style="font-size:12px;color:var(--muted);">af samlet indtjening</span>' +
     '</div>' +
-    '<span style="font-size:15px;font-weight:500;color:var(--green-dark);" id="sag-min-prov">' + formatKr(minProv) + '</span>' +
+    '<span style="font-size:16px;font-weight:700;color:var(--green-dark);" id="sag-min-prov">' + formatKr(minProv) + '</span>' +
     '</div>' +
-    '<div style="background:#f0f9f5;border-radius:var(--radius);padding:8px 14px;display:flex;justify-content:space-between;align-items:center;">' +
-    '<span style="font-size:12px;color:var(--muted);">Provision udgør</span>' +
-    '<span style="font-size:15px;font-weight:600;color:' + (netto > 0 && minProv > 0 ? (netto >= minProv ? 'var(--green-dark)' : '#c0392b') : 'var(--muted)') + ';" id="sag-prov-pct">' +
-    (netto > 0 ? Math.round(minProv) + ' kr (' + minProvPct + '% af fortjeneste)' : '—') +
-    '</span></div>' +
     '</div>';
 
   mc.innerHTML = html;
@@ -1418,66 +1819,71 @@ function renderEkonomiPanel() {
   if (!panel || !currentUser) return;
   var now = new Date();
   var thisMonth = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
-  var twelveAgo = new Date(now); twelveAgo.setMonth(now.getMonth() - 11);
   var mine = cases.filter(function(c) {
     return c.createdBy === currentUser.username || c.updatedBy === currentUser.username;
   });
-  var maaned = mine.filter(function(c) { return (c.updatedAt || c.createdAt || '').indexOf(thisMonth) === 0; });
-  var rullende = mine.filter(function(c) { return (c.updatedAt || c.createdAt || '') >= twelveAgo.toISOString(); });
-  var visSet = ecoTab === 'maaned' ? maaned : rullende;
-  var netto = visSet.reduce(function(s, c) { return s + calcNetto(c); }, 0);
-  var udg = visSet.reduce(function(s, c) { return s + (parseFloat(c.udgifter) || 0); }, 0);
-  var bruttoSum = netto + udg;
-  var label = ecoTab === 'maaned' ? now.toLocaleDateString('da-DK', { month: 'long', year: 'numeric' }) : 'Seneste 12 m\u00e5neder';
 
-  // Update sag fields
+  // Opdater sag-netto felt
   var nettoEl = el('sag-netto');
   if (nettoEl) {
     var cc = activeCase();
     if (cc) {
       var sagNetto = calcNetto(cc);
+      var minProvPctCC = parseFloat(cc.minProvPct || 30);
       nettoEl.textContent = formatKr(sagNetto);
-      var minEl = el('sag-min-prov'); if (minEl) minEl.textContent = formatKr(sagNetto * 0.4);
-      var provKrEl = el('prov-kr-vis');
-      if (provKrEl) {
-        var pris2 = parseFloat((cc.pris||'').replace(/\./g,'').replace(',','.')) || 0;
-        provKrEl.textContent = cc.provPct ? formatKr(Math.round(pris2 * (parseFloat(cc.provPct)||0) / 100)) : '\u2014';
-      }
+      var minEl = el('sag-min-prov');
+      if (minEl) minEl.textContent = formatKr(sagNetto * minProvPctCC / 100);
     }
   }
 
-  // Month-by-month rows
+  // Byg 12 måneder bagud
   var monthRows = '';
-  for (var m = 5; m >= 0; m--) {
+  var total12Netto = 0;
+  var total12Udg = 0;
+
+  for (var m = 11; m >= 0; m--) {
     var d2 = new Date(now.getFullYear(), now.getMonth() - m, 1);
     var mKey = d2.getFullYear() + '-' + String(d2.getMonth() + 1).padStart(2, '0');
-    var mLabel = d2.toLocaleDateString('da-DK', { month: 'short' });
+    var mLabel = d2.toLocaleDateString('da-DK', { month: 'short', year: '2-digit' });
     var mCases = mine.filter(function(c) { return (c.updatedAt || c.createdAt || '').indexOf(mKey) === 0; });
     var mNetto = mCases.reduce(function(s, c) { return s + calcNetto(c); }, 0);
-    if (mNetto !== 0 || mKey === thisMonth) {
-      monthRows += '<div class="eco-row"><span class="eco-key">' + mLabel + (mKey === thisMonth ? ' \u25cf' : '') + '</span>' +
-        '<span class="eco-val' + (mNetto >= 0 ? ' positive' : ' negative') + '">' + formatKr(mNetto) + '</span></div>';
-    }
+    var mUdg   = mCases.reduce(function(s, c) { return s + (parseFloat(c.udgifter) || 0); }, 0);
+    total12Netto += mNetto;
+    total12Udg   += mUdg;
+    var isThis = mKey === thisMonth;
+    monthRows += '<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 6px;border-radius:4px;' + (isThis ? 'background:rgba(29,158,117,0.15);' : '') + '">' +
+      '<span style="font-size:11px;color:rgba(255,255,255,' + (isThis ? '0.9' : '0.45') + ');min-width:48px;">' + mLabel + (isThis ? ' ●' : '') + '</span>' +
+      '<span style="font-size:11px;color:' + (mNetto > 0 ? '#5DCAA5' : mNetto < 0 ? '#F09595' : 'rgba(255,255,255,0.25)') + ';text-align:right;min-width:60px;">' +
+      (mNetto !== 0 ? formatKr(mNetto) : '—') + '</span>' +
+      '<span style="font-size:10px;color:rgba(255,255,255,0.2);text-align:right;min-width:16px;">' + (mCases.length > 0 ? mCases.length : '') + '</span>' +
+    '</div>';
   }
 
-  panel.innerHTML = '<div class="eco-panel">' +
+  panel.innerHTML =
+    '<div class="eco-panel">' +
     '<div class="eco-title">Min \u00f8konomi &middot; ' + currentUser.name + '</div>' +
-    '<div class="eco-period-tabs">' +
-    '<button class="eco-tab' + (ecoTab === 'maaned' ? ' active' : '') + '" id="eco-tab-maaned">Denne m\u00e5ned</button>' +
-    '<button class="eco-tab' + (ecoTab === 'rullende' ? ' active' : '') + '" id="eco-tab-rullende">12 m\u00e5neder</button>' +
-    '</div>' +
-    '<div style="font-size:11px;color:rgba(255,255,255,0.25);margin-bottom:8px;">' + label + ' &middot; ' + visSet.length + ' sager</div>' +
-    '<div class="eco-row"><span class="eco-key">Samlet provision</span><span class="eco-val positive">' + formatKr(bruttoSum) + '</span></div>' +
-    '<div class="eco-row"><span class="eco-key">Udgifter</span><span class="eco-val negative">-' + formatKr(udg) + '</span></div>' +
-    '<div class="eco-netto"><span class="eco-netto-label">Netto</span><span class="eco-netto-val ' + (netto >= 0 ? 'positive' : 'negative') + '">' + formatKr(netto) + '</span></div>' +
-    '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;margin-top:4px;">' +
-    '<span style="font-size:11px;color:rgba(255,255,255,0.4);">Min provision</span>' +
-    '<span style="font-size:13px;color:#5DCAA5;font-weight:500;">' + formatKr(netto * 0.4) + '</span></div>' +
-    (monthRows ? '<hr class="eco-divider" style="margin-top:10px;"><div style="font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.25);margin:6px 0;">M\u00e5ned for m\u00e5ned</div>' + monthRows : '') +
-    '</div>';
 
-  var t1 = el('eco-tab-maaned'); if (t1) t1.onclick = function() { ecoTab = 'maaned'; renderEkonomiPanel(); };
-  var t2 = el('eco-tab-rullende'); if (t2) t2.onclick = function() { ecoTab = 'rullende'; renderEkonomiPanel(); };
+    // 12 mdr total rubrik
+    '<div style="background:rgba(29,158,117,0.1);border:1px solid rgba(29,158,117,0.25);border-radius:var(--radius);padding:10px 12px;margin-bottom:10px;">' +
+      '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:rgba(255,255,255,0.35);margin-bottom:6px;">12 m\u00e5neder total</div>' +
+      '<div style="display:flex;justify-content:space-between;margin-bottom:4px;">' +
+        '<span style="font-size:11px;color:rgba(255,255,255,0.45);">Provision</span>' +
+        '<span style="font-size:12px;color:#5DCAA5;">' + formatKr(total12Netto + total12Udg) + '</span>' +
+      '</div>' +
+      '<div style="display:flex;justify-content:space-between;margin-bottom:6px;">' +
+        '<span style="font-size:11px;color:rgba(255,255,255,0.45);">Udgifter</span>' +
+        '<span style="font-size:12px;color:#F09595;">-' + formatKr(total12Udg) + '</span>' +
+      '</div>' +
+      '<div style="display:flex;justify-content:space-between;padding-top:6px;border-top:1px solid rgba(255,255,255,0.08);">' +
+        '<span style="font-size:12px;font-weight:700;color:rgba(255,255,255,0.7);">Samlet indtjening</span>' +
+        '<span style="font-size:15px;font-weight:700;color:' + (total12Netto >= 0 ? '#5DCAA5' : '#F09595') + ';">' + formatKr(total12Netto) + '</span>' +
+      '</div>' +
+    '</div>' +
+
+    // Måned for måned
+    '<div style="font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.25);margin-bottom:4px;">Måned for måned</div>' +
+    monthRows +
+    '</div>';
 }
 
 // ── KALENDER ──────────────────────────────────────────────────────────────────
@@ -1505,6 +1911,174 @@ function addToCalendar() {
 }
 
 // ── PRINT ─────────────────────────────────────────────────────────────────────
+
+// ── ADM FORLÆNGELSE ─────────────────────────────────────────────────────────
+var _admMdr = 0;
+
+function fjernAdmForlang() {
+  var c = activeCase(); if (!c) return;
+  c.admForlang = false;
+  c.admForlangMdr = 0;
+  c.admForlangForsikring = 0;
+  c.aftaletyper = c.aftaletyper.filter(function(a){ return a !== 'ADM Forlængelse'; });
+  save(); renderMain(); renderSidebar();
+}
+
+function visAdmForlangModal() {
+  var c = activeCase(); if (!c) return;
+  _admMdr = 0;
+  // Reset knapper
+  [1,2,3].forEach(function(n) {
+    var b = el('adm-mdr-' + n);
+    if (b) { b.style.background='#fff'; b.style.borderColor='var(--border)'; b.style.color='#333'; }
+  });
+  var prev = el('adm-forlang-preview');
+  if (prev) prev.style.display = 'none';
+  var ok = el('adm-forlang-ok');
+  if (ok) ok.style.display = 'none';
+  el('adm-forlang-modal').style.display = 'flex';
+}
+
+function valgAdmMdr(n) {
+  var c = activeCase(); if (!c) return;
+  _admMdr = n;
+  // Highlight valgt knap
+  [1,2,3].forEach(function(i) {
+    var b = el('adm-mdr-' + i);
+    if (!b) return;
+    if (i === n) {
+      b.style.background = '#FFF3E0';
+      b.style.borderColor = '#F59E0B';
+      b.style.color = '#7C4A00';
+    } else {
+      b.style.background = '#fff';
+      b.style.borderColor = 'var(--border)';
+      b.style.color = '#333';
+    }
+  });
+
+  // Forsikring — kun hvis forsikret hos Købstæderne (r6=true)
+  var harKobsFors = c.checks && c.checks['r6'];
+  var aarsPris = harKobsFors ? calcForsikringAars(c.pris) : 0;
+  var mdrPris = aarsPris > 0 ? Math.round(aarsPris / 12 * n) : 0;
+
+  // Tracker — kun hvis bil over 300.000 kr
+  var bilPris = parseFloat((c.pris || '').replace(/\./g,'').replace(',','.')) || 0;
+  var harTracker = bilPris >= 300000;
+  var trackerAarsPris = 1200; // tracker abonnement pr år
+  var trackerMdrPris = harTracker ? Math.round(trackerAarsPris / 12 * n) : 0;
+
+  // Ny slutdato
+  var gammelSlut = c.periodeslut ? new Date(c.periodeslut) : new Date();
+  var nySlut = new Date(gammelSlut);
+  nySlut.setMonth(nySlut.getMonth() + n);
+  var nySlutStr = nySlut.toISOString().split('T')[0];
+
+  // Vis preview
+  var prev = el('adm-forlang-preview');
+  var prevContent = el('adm-forlang-preview-content');
+  if (prev && prevContent) {
+    var previewHtml =
+      '<div style="display:flex;justify-content:space-between;margin-bottom:6px;">' +
+        '<span style="font-size:13px;color:#666;">Ny slutdato:</span>' +
+        '<span style="font-size:13px;font-weight:600;">' + formatDate(nySlutStr) + '</span>' +
+      '</div>' +
+      '<div style="display:flex;justify-content:space-between;margin-bottom:6px;">' +
+        '<span style="font-size:13px;color:#666;">Forlænges med:</span>' +
+        '<span style="font-size:13px;font-weight:600;">' + n + ' mdr.</span>' +
+      '</div>';
+    if (mdrPris > 0) {
+      previewHtml +=
+        '<div style="display:flex;justify-content:space-between;padding-top:8px;border-top:1px solid #eee;margin-top:4px;">' +
+          '<span style="font-size:13px;color:#F59E0B;font-weight:600;">Forsikring (Købs.):</span>' +
+          '<span style="font-size:14px;font-weight:700;color:#7C4A00;">' + formatKr(mdrPris) + ' kr</span>' +
+        '</div>';
+    }
+    if (trackerMdrPris > 0) {
+      previewHtml +=
+        '<div style="display:flex;justify-content:space-between;margin-top:4px;">' +
+          '<span style="font-size:13px;color:#F59E0B;font-weight:600;">Tracker abonnement:</span>' +
+          '<span style="font-size:14px;font-weight:700;color:#7C4A00;">' + formatKr(trackerMdrPris) + ' kr</span>' +
+        '</div>';
+    }
+    if (!harKobsFors) {
+      previewHtml += '<div style="margin-top:6px;font-size:11px;color:#aaa;">Ikke forsikret hos Købstæderne — forsikring faktureres ikke</div>';
+    }
+    previewHtml += '<div style="margin-top:4px;font-size:11px;color:#aaa;">Øvrige punkter nedtones</div>';
+    prevContent.innerHTML = previewHtml;
+    prev.style.display = 'block';
+  }
+
+  var ok = el('adm-forlang-ok');
+  if (ok) ok.style.display = 'block';
+}
+
+function bekræftAdmForlang() {
+  var c = activeCase(); if (!c || !_admMdr) return;
+
+  // Beregn ny slutdato
+  var gammelSlut = c.periodeslut ? new Date(c.periodeslut) : new Date();
+  var nySlut = new Date(gammelSlut);
+  nySlut.setMonth(nySlut.getMonth() + _admMdr);
+  var nySlutIso = nySlut.toISOString().split('T')[0];
+
+  // Forsikring — KUN hvis forsikret hos Købstæderne (r6=true)
+  var harKobsFors = c.checks && c.checks['r6'];
+  var aarsPris = harKobsFors ? calcForsikringAars(c.pris) : 0;
+  var mdrPris = aarsPris > 0 ? Math.round(aarsPris / 12 * _admMdr) : 0;
+
+  // Tracker — kun hvis bil over 300.000 kr
+  var bilPris = parseFloat((c.pris || '').replace(/\./g,'').replace(',','.')) || 0;
+  var harTracker = bilPris >= 300000;
+  var trackerMdrPris = harTracker ? Math.round(1200 / 12 * _admMdr) : 0;
+
+  // Gem gammelt sagsnummer
+  c.gammeltSagnr = c.sagnr || '';
+
+  // Opdater sag
+  c.periodeslut = nySlutIso;
+  c.admForlangMdr = _admMdr;
+  c.admForlangForsikring = mdrPris;
+  c.admForlangTracker    = trackerMdrPris;
+
+  // Sæt forsikringspris i r6 notat automatisk — kun hvis Købstædernes
+  if (mdrPris > 0) {
+    if (!c.notes) c.notes = {};
+    c.notes['r6'] = String(mdrPris);
+  }
+
+  // Sæt tracker notat hvis relevant
+  if (trackerMdrPris > 0) {
+    if (!c.notes) c.notes = {};
+    c.notes['r10'] = String(trackerMdrPris);
+  }
+
+  // Sæt admSelskab til eksisterende selskab hvis ikke sat
+  if (!c.admSelskab) {
+    var eksisterendeSelskab = (c.aftaletyper || []).filter(function(a){ return ['Fleasing','Krone','Hessel','AL Finans'].indexOf(a) !== -1; })[0];
+    if (eksisterendeSelskab) c.admSelskab = eksisterendeSelskab;
+  }
+
+  // Tilføj ADM Forlængelse som aftaletype
+  if (c.aftaletyper.indexOf('ADM Forlængelse') === -1) {
+    c.aftaletyper.push('ADM Forlængelse');
+  }
+
+  // Shade irrelevante tjekpunkter
+  // r1 (kontrakt), r2 (ID), r3 (betaling), r4 (leasingkode), r5 (syn)
+  // sæt dem som nedtonede via admForlang flag
+  c.admForlang = true;
+
+  save(); renderMain(); renderSidebar(); renderExpiryPanel();
+  el('adm-forlang-modal').style.display = 'none';
+
+  var msg = 'ADM Forlængelse oprettet — ' + _admMdr + ' mdr.\n\nNy slutdato: ' + formatDate(nySlutIso);
+  if (mdrPris > 0) msg += '\n\nForsikring (Købs.) at fakturere: ' + formatKr(mdrPris) + ' kr';
+  else msg += '\n\nIngen forsikring (ikke Købstædernes)';
+  if (trackerMdrPris > 0) msg += '\nTracker abonnement: ' + formatKr(trackerMdrPris) + ' kr';
+  alert(msg);
+}
+
 function forlængSag() {
   var c = activeCase(); if (!c) return;
   if (!c.periodeslut) { alert('Sagen har ingen udl\u00f8bsdato'); return; }
@@ -1557,7 +2131,9 @@ function injectKroneData(d) {
     ['postby',      d.postby],
     ['bilmodel',    d.bilmodel],
     ['stel',        d.stel],
-    ['regnr',       d.regnr],
+    ['farve',       d.farve],
+    ['km',          d.km],
+    ['forsteReg',   d.forsteReg],
     ['pris',        d.pris],
     ['restvardi',   d.restvardi],
     ['periode',     d.loebetid],
@@ -1577,8 +2153,8 @@ function injectKroneData(d) {
   map.forEach(function(pair) {
     if (pair[1] && !c[pair[0]]) { c[pair[0]] = String(pair[1]); updated++; }
   });
-  // reg.nr fra DMR overskrives ALTID
-  if (d.regnr) { c.regnr = String(d.regnr); updated++; }
+  // reg.nr fra DMR — sæt kun hvis tomt
+  if (d.regnr && !c.regnr) { c.regnr = String(d.regnr); updated++; }
   // Altid overskriv syn og leasingperiode fra Krone — de er autoritative
   // Parser dd-mm-yyyy -> yyyy-mm-dd hvis nødvendigt
   function parseKroneDato(s) {
@@ -1590,8 +2166,15 @@ function injectKroneData(d) {
     return s;
   }
   if (d.synSenest)  { c.naesteSyn   = parseKroneDato(d.synSenest);  updated++; }
-  if (d.leasingFra) { c.periodestart = parseKroneDato(d.leasingFra); updated++; }
-  if (d.leasingTil) { c.periodeslut  = parseKroneDato(d.leasingTil); updated++; }
+  // Valider leasingFra/Til — må IKKE matche synSenest
+  if (d.leasingFra && d.leasingFra !== d.synSenest) {
+    var pFra = parseKroneDato(d.leasingFra);
+    if (pFra && pFra !== c.naesteSyn) { c.periodestart = pFra; updated++; }
+  }
+  if (d.leasingTil && d.leasingTil !== d.synSenest) {
+    var pTil = parseKroneDato(d.leasingTil);
+    if (pTil && pTil !== c.naesteSyn) { c.periodeslut = pTil; updated++; }
+  }
   // Provision — altid opdater hvis der er en værdi
   // Forsikringsselskab fra Krone
   if (d.forsikringsselskab && d.forsikringsselskab !== 'Vælg forsikring') {
@@ -1613,24 +2196,218 @@ function injectKroneData(d) {
   }
   // Momsdød — altid sæt fra Krone
   if (typeof d.momsdod !== 'undefined') { c.momsdod = d.momsdod; updated++; }
-  if (d.provision && parseFloat(d.provision) > 0) {
+  if (d.provision && parseFloat(d.provision) > 0 && !c.provFocus) {
     c.provFocus = String(d.provision); updated++;
   }
-  // Aftaletyper
+  // Aftaletyper — brug selskab fra data (ASG sender Hessel/Fleggaard, Krone sender Krone)
   if (!c.aftaletyper) c.aftaletyper = [];
-  if (c.aftaletyper.indexOf('Krone') === -1) { c.aftaletyper.push('Krone'); }
+  var _asgSelskaber = ['Hessel','Fleggaard','AL Finans'];
+  if (d.aftaletyper && d.aftaletyper.length > 0) {
+    var _harASGSelskab = d.aftaletyper.some(function(a){ return _asgSelskaber.indexOf(a) !== -1; });
+    d.aftaletyper.forEach(function(a) {
+      if (c.aftaletyper.indexOf(a) === -1) c.aftaletyper.push(a);
+    });
+    // Fjern Krone hvis det er Hessel/Fleggaard/AL Finans
+    if (_harASGSelskab) {
+      c.aftaletyper = c.aftaletyper.filter(function(a){ return a !== 'Krone'; });
+    }
+  } else {
+    if (c.aftaletyper.indexOf('Krone') === -1) c.aftaletyper.push('Krone');
+  }
   if (d.produkt) {
     if (d.produkt.indexOf('Forl') !== -1 && c.aftaletyper.indexOf('Forl\u00e6ngelse') === -1) c.aftaletyper.push('Forl\u00e6ngelse');
     if ((d.produkt.indexOf('Hjemtagelse') !== -1) && c.aftaletyper.indexOf('Hjemtagelse af ny bil') === -1) c.aftaletyper.push('Hjemtagelse af ny bil');
   }
+  // Split — sæt aftaletype og privat leasingtager
+  if (d._erSplit) {
+    if (c.aftaletyper.indexOf('Split') === -1) c.aftaletyper.push('Split');
+    if (d.splitKunde)   c.splitKunde   = d.splitKunde;
+    if (d.splitAdresse) c.splitAdresse = d.splitAdresse;
+    if (d.splitPostby)  c.splitPostby  = d.splitPostby;
+    if (d.splitTlf)     c.splitTlf     = d.splitTlf;
+    if (d.splitEmail)   c.splitEmail   = d.splitEmail;
+    updated++;
+  }
+  // Tilbud PDF fra Krone — gem i filer
+  if (d.tilbudPdf && d.tilbudPdfNavn) {
+    if (!c.filer) c.filer = [];
+    var findesAllerede = c.filer.some(function(f){ return f.name === d.tilbudPdfNavn; });
+    if (!findesAllerede) {
+      c.filer.push({
+        name: d.tilbudPdfNavn,
+        type: 'application/pdf',
+        size: Math.round(d.tilbudPdf.length * 0.75),
+        dataUrl: d.tilbudPdf,
+        tilfojet: new Date().toISOString(),
+        kilde: 'Krone Connect'
+      });
+      updated++;
+    }
+  }
+
+  // Billeder fra Krone thumbnails
+  if (d.billeder && d.billeder.length > 0) {
+    if (!c.filer) c.filer = [];
+    var nyeBilleder = 0;
+    d.billeder.forEach(function(b) {
+      var findes = c.filer.some(function(f){ return f.name === b.name; });
+      if (!findes) {
+        c.filer.push({
+          name: b.name,
+          type: b.type || 'image/jpeg',
+          size: b.size,
+          dataUrl: b.dataUrl,
+          tilfojet: new Date().toISOString(),
+          kilde: 'Krone Connect'
+        });
+        nyeBilleder++;
+        updated++;
+      }
+    });
+  }
+
   c.updatedAt = new Date().toISOString();
   save(); renderMain(); renderSidebar();
+  var _atKort = el('aftaletype-card'); if (_atKort) _atKort.innerHTML = renderAftaletyper(c);
   var msg = '\u2714 Sag opdateret fra Krone Connect';
   if (d.provision && parseFloat(d.provision) > 0) msg += '\nProvision: ' + parseInt(d.provision).toLocaleString('da-DK') + ' kr';
   if (d.leasingTil) msg += '\nUdl\u00f8b: ' + d.leasingTil;
   if (d.synSenest)  msg += '\nN\u00e6ste syn: ' + d.synSenest;
+  if (d.tilbudPdf)  msg += '\n\uD83D\uDCC4 Tilbud PDF gemt p\u00e5 sagen';
+  if (d.billeder && d.billeder.length > 0) msg += '\n\uD83D\uDCF7 ' + d.billeder.length + ' billeder gemt p\u00e5 sagen';
   alert(msg);
 }
+
+
+function visASGSelskabValg(d) {
+  var ov = document.createElement('div');
+  ov.id = 'asg-selskab-modal';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;font-family:Georgia,serif;';
+
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:28px;max-width:360px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.3);';
+
+  var title = document.createElement('div');
+  title.style.cssText = 'font-size:18px;font-weight:600;margin-bottom:8px;';
+  title.textContent = 'Vælg leasingselskab';
+  box.appendChild(title);
+
+  var sub = document.createElement('div');
+  sub.style.cssText = 'font-size:13px;color:#666;margin-bottom:20px;';
+  sub.textContent = (d.kunde||'') + (d.bilmodel ? ' · ' + d.bilmodel : '');
+  box.appendChild(sub);
+
+  ['Hessel','Fleggaard','AL Finans'].forEach(function(s) {
+    var btn = document.createElement('button');
+    btn.textContent = s;
+    btn.style.cssText = 'display:block;width:100%;padding:12px 16px;border:1.5px solid #ddd;border-radius:8px;background:#fff;cursor:pointer;font-size:14px;font-weight:500;text-align:left;font-family:Georgia,serif;margin-bottom:8px;';
+    btn.addEventListener('click', function(){ valgASGSelskab(s); });
+    btn.addEventListener('mouseover', function(){ this.style.background='#f0faf5'; });
+    btn.addEventListener('mouseout', function(){ this.style.background='#fff'; });
+    box.appendChild(btn);
+  });
+
+  var annuller = document.createElement('button');
+  annuller.textContent = 'Annuller';
+  annuller.style.cssText = 'display:block;width:100%;padding:8px;border:1px solid #ddd;border-radius:8px;background:#fff;cursor:pointer;font-size:13px;color:#888;font-family:Georgia,serif;margin-top:4px;';
+  annuller.addEventListener('click', lukkASGModal);
+  box.appendChild(annuller);
+
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+  window._asgPendingData = d;
+}
+
+function lukkASGModal() { var m = document.getElementById('asg-selskab-modal'); if(m) m.remove(); }
+
+function valgASGSelskab(selskab) {
+  var d = window._asgPendingData;
+  if (!d) return;
+  document.getElementById('asg-selskab-modal').remove();
+  d.aftaletyper = [selskab];
+  delete d._kilde;
+  behandlKroneData(d);
+}
+
+function hentTjekbilData(stel, callback) {
+  // Åbn tjekbil forsiden, skriv stelnummer i søgefelt, tryk søg, aflæs efter 5 sek
+  var w = window.open('https://www.tjekbil.dk', '_tjekbil_dmr');
+  // Vent til siden er loadet
+  var loadTries = 0;
+  var loadCheck = setInterval(function() {
+    loadTries++;
+    if (loadTries > 20) { clearInterval(loadCheck); callback(null); return; }
+    try {
+      if (w.closed) { clearInterval(loadCheck); callback(null); return; }
+      var inp = w.document.querySelector('input[placeholder="AB12345"]');
+      if (!inp) return; // Ikke loadet endnu
+      clearInterval(loadCheck);
+      // Skriv stelnummer i søgefelt
+      inp.focus();
+      inp.value = stel;
+      inp.dispatchEvent(new w.Event('input', {bubbles:true}));
+      inp.dispatchEvent(new w.Event('change', {bubbles:true}));
+      // Tryk Enter for at søge
+      setTimeout(function() {
+        inp.dispatchEvent(new w.KeyboardEvent('keydown', {key:'Enter', keyCode:13, bubbles:true}));
+        inp.dispatchEvent(new w.KeyboardEvent('keypress', {key:'Enter', keyCode:13, bubbles:true}));
+        inp.dispatchEvent(new w.KeyboardEvent('keyup', {key:'Enter', keyCode:13, bubbles:true}));
+        // Find og klik søgeknap hvis den findes
+        var btns = w.document.querySelectorAll('button');
+        for (var i=0; i<btns.length; i++) {
+          if (btns[i].textContent.toLowerCase().indexOf('søg') !== -1 || btns[i].type === 'submit') {
+            btns[i].click(); break;
+          }
+        }
+        // Vent 5 sekunder og aflæs siden
+        setTimeout(function() {
+          try {
+            var txt = w.document.body.innerText || '';
+            var result = parseTjekbilTekst(txt);
+            w.close();
+            callback(result);
+          } catch(e2) {
+            try { w.close(); } catch(e3) {}
+            callback(null);
+          }
+        }, 5000);
+      }, 1000);
+    } catch(e) {
+      // Ikke klar endnu
+    }
+  }, 300);
+}
+
+function parseTjekbilTekst(txt) {
+  function daDato(s){ var p=s.split('-'); return p[2]+'-'+p[1]+'-'+p[0]; }
+  var result = {};
+  // Reg.nr
+  var rnM = txt.match(/([A-ZÆØÅ]{2}\d{5})/);
+  if (rnM) result.regnr = rnM[1];
+  // Leasingperiode
+  var lpM = txt.match(/Leasingperiode (\d{2}-\d{2}-\d{4}) til (\d{2}-\d{2}-\d{4})/);
+  if (!lpM) lpM = txt.match(/(\d{2})\/(\d{2})\/(\d{4}) til (\d{2})\/(\d{2})\/(\d{4})/);
+  if (lpM) {
+    if (lpM[0].indexOf('/') !== -1) {
+      result.leasingFra = lpM[3]+'-'+lpM[2]+'-'+lpM[1];
+      result.leasingTil = lpM[6]+'-'+lpM[5]+'-'+lpM[4];
+    } else {
+      result.leasingFra = daDato(lpM[1]);
+      result.leasingTil = daDato(lpM[2]);
+    }
+  }
+  // Forsikring
+  var fiIdx = txt.indexOf('NUVÆRENDE FORSIKRINGSSELSKAB');
+  if (fiIdx !== -1) {
+    result.forsikring = txt.substring(fiIdx+28).trim().split('\n')[0].trim().split('  ')[0].trim();
+  }
+  // Næste syn
+  var synM = txt.match(/Næste syn inden (\d{2}-\d{2}-\d{4})/);
+  if (!synM) synM = txt.match(/Next inspection before (\d{2}-\d{2}-\d{4})/);
+  if (synM) result.synSenest = daDato(synM[1]);
+  return result;
+}
+
 
 function visKroneHentModal() {
   var c = activeCase(); if (!c) return;
@@ -1676,10 +2453,11 @@ function uploadKontrakt(file) {
       binary += String.fromCharCode.apply(null, bytes.subarray(b, b + 8192));
     }
     var base64 = btoa(binary);
-    fetch('https://api.anthropic.com/v1/messages', {
+    fetch('/api/claude', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        api_key: apiKey,
         model: 'claude-sonnet-4-6',
         max_tokens: 1024,
         messages: [{
@@ -1775,6 +2553,10 @@ function buildPrintSheet() {
     '<span class="ps-tag ps-tag-ras">' + saelgerKode + '</span>' +
     '<span class="ps-meta-label">Leasingperiode startdato</span>' +
     '<span class="ps-meta-val">' + (c.periodestart ? formatDate(c.periodestart) : '____________') + '</span>' +
+    '<span class="ps-meta-label" style="margin-left:8pt;">Udl\u00f8b</span>' +
+    '<span class="ps-meta-val">' + (c.periodeslut ? formatDate(c.periodeslut) : '____________') + '</span>' +
+    '<span class="ps-meta-label" style="margin-left:8pt;">N\u00e6ste syn</span>' +
+    '<span class="ps-meta-val">' + (c.naesteSyn ? formatDate(c.naesteSyn) : '____________') + '</span>' +
     '<span class="ps-meta-label" style="margin-left:auto;">Periode:</span>' +
     '<span class="ps-meta-val-box">' + (c.periode || '') + '</span>' +
     '<span class="ps-meta-label">M\u00e5neder</span>' +
@@ -1783,17 +2565,27 @@ function buildPrintSheet() {
   // ─── AFTALETYPE ───────────────────────────────────────────────────────────
   html += '<div class="ps-aftale-row">';
   var aftaleItems = [
-    {key:'Fleasing',label:'Focus'}, {key:'Fleasing',label:'Fleasing'}, {key:'Krone',label:'Krone'},
-    {key:'Hjemtagelse af ny bil',label:'Hjemtagelse af ny bil - Autotransport'},
+    {key:'Fleasing',label:'Focus/Fleasing'}, {key:'Krone',label:'Krone'},
+    {key:'Hessel',label:'Hessel'}, {key:'Fleggaard',label:'Fleggaard'}, {key:'AL Finans',label:'AL Finans'},
+    {key:'Hjemtagelse af ny bil',label:'Hjemtagelse af ny bil'},
     {key:'Forl\u00e6ngelse',label:'Forl\u00e6ngelse, tidl sags nr. ' + (c.gammeltSagnr ? c.gammeltSagnr : '')},
-    {key:'Overtagelse / flytning',label:'Overtagelse / flytning fra andet leasingselskab'},
-    {key:'Stilstand',label:'Stilstand'}
+    {key:'Overtagelse / flytning',label:'Overtagelse / flytning'},
+    {key:'Stilstand',label:'Stilstand'},
+    {key:'Split',label:'Split'},
+    {key:'ADM Forl\u00e6ngelse',label:'ADM Forl\u00e6ngelse'}
   ];
   aftaleItems.forEach(function(a) {
     var inc = c.aftaletyper && c.aftaletyper.indexOf(a.key) !== -1;
     html += '<span class="ps-aftale-item"><span class="ps-aftale-box' + (inc ? ' checked' : '') + '">' + (inc ? '\u2713' : '') + '</span>' + a.label + '</span>';
   });
   html += '</div>';
+
+  // ADM Forlængelse forsikring info i print
+  if (c.admForlang && c.admForlangForsikring) {
+    html += '<div style="background:#FFF3E0;border:1px solid #F59E0B;border-radius:6pt;padding:6pt 10pt;margin-bottom:4pt;font-size:9pt;color:#7C4A00;">' +
+      '<strong>ADM Forl\u00e6ngelse ' + (c.admForlangMdr||'?') + ' mdr.</strong> — Forsikring at fakturere: <strong>' + formatKr(c.admForlangForsikring) + ' kr</strong>' +
+    '</div>';
+  }
 
   // ─── TABEL ────────────────────────────────────────────────────────────────
   html += '<table class="ps-table">';
@@ -1816,11 +2608,14 @@ function buildPrintSheet() {
   html += rowHeader('Forsikring, tracker, nummerplader:');
   // Forsikring — vis kun pris hvis forsikring er afkrydset, shade hvis ikke
   var harFors = chk('r6');
+  // Brug periodeberegnet pris — årsbeløb ÷ 12 × periode
+  var erStilstand = c.aftaletyper && c.aftaletyper.indexOf('Stilstand') !== -1;
+  var forsPeriodePris = calcForsikring(c.pris, c.periode, erStilstand);
   html += '<tr' + (!harFors ? ' style="opacity:0.35;"' : '') + '>' +
     '<td class="ps-tag-cell"><span class="ps-tag ps-tag-saelger">' + saelgerKode + '</span></td>' +
     '<td class="ps-label">Forsikring via K\u00f8bst\u00e6derne Simple Leasing</td>' +
     '<td class="ps-x">' + (harFors ? '\u2713' : '') + '</td>' +
-    '<td class="ps-pris">' + (harFors && nt('r6') ? nt('r6') + ' kr' : '') + '</td>' +
+    '<td class="ps-pris">' + (harFors ? (nt('r6') || forsPeriodePris) + ' kr' : '') + '</td>' +
     '<td class="ps-note-cell"></td></tr>';
   html += '<tr' + (!harFors ? ' style="opacity:0.35;"' : '') + '>' +
     '<td class="ps-tag-cell"><span class="ps-tag ps-tag-saelger">' + saelgerKode + '</span></td>' +
@@ -1837,9 +2632,10 @@ function buildPrintSheet() {
   if (trackerReq) {
     var trackerMonteret = c.checks && c.checks['r9_monteret'];
     var trackerSkal    = c.checks && c.checks['r9_skal'];
+    var trackerPris    = (c.notes && c.notes['r9_pris']) || '2800';
     html += rowPris(saelgerKode,
-      'Tracker krav over 300.000kr. (2.800 + moms) \u2014 ' + (trackerMonteret ? 'MONTERET' : trackerSkal ? 'Skal monteres' : '?'),
-      trackerMonteret, trackerMonteret ? '2.800' : '', '(2.800 + moms)');
+      'Tracker krav over 300.000kr. (' + trackerPris + ' + moms) \u2014 ' + (trackerMonteret ? 'MONTERET' : trackerSkal ? 'Skal monteres' : '?'),
+      trackerMonteret, trackerMonteret ? '' : trackerPris + ' kr', trackerMonteret ? 'Monteret — ingen opkr\u00e6vning' : '(' + trackerPris + ' + moms)');
     html += rowPris(saelgerKode, 'Tracker abonnement (1.200 + moms)', chk('r10'), '', '');
   } else {
     html += '<tr style="opacity:0.35;"><td class="ps-tag-cell"><span class="ps-tag ps-tag-saelger">' + saelgerKode + '</span></td><td class="ps-label">Tracker krav over 300.000kr. (2.800 + moms)</td><td class="ps-x"></td><td class="ps-pris"></td><td class="ps-note-cell">N/A \u2014 under 300.000 kr</td></tr>';
@@ -2693,8 +3489,8 @@ function kbDropPDF(file, type) {
     var prompt = type === 'kunde'
       ? 'Udtræk KUN med JSON: {"kunde":"","email":"","tlf":"","adresse":"","postby":""}'
       : 'Udtræk KUN med JSON: {"bilmodel":"","stel":"","regnr":""}';
-    fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 256,
+    fetch('/api/claude', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ api_key: apiKey, model: 'claude-sonnet-4-6', max_tokens: 256,
         messages: [{ role: 'user', content: [
           { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: btoa(binary) } },
           { type: 'text', text: prompt }
@@ -2849,6 +3645,9 @@ function startKroneLytter() {
 
   // Tjek URL hash for Krone data (fra "Send til Sagsark" knap)
   function procesHash() {
+    // Kør kun når brugeren er logget ind
+    if (!currentUser) return;
+
     // Tjek URL hash
     var hash = window.location.hash;
     if (hash && hash.indexOf('krone=') !== -1) {
@@ -2862,7 +3661,7 @@ function startKroneLytter() {
         }
       } catch(e) {}
     }
-    // Tjek localStorage (fallback når window.open ikke kan genbruge fane)
+    // Tjek localStorage
     try {
       var ls = localStorage.getItem('sl_krone_pending');
       if (ls) {
@@ -2908,10 +3707,18 @@ function startKroneLytter() {
 }
 
 function behandlKroneData(d) {
-  // Find eksisterende sag via stel, regnr, aftalenr eller kundenavn
+  // Hvis det er ASG data — spørg om selskab inden vi fortsætter
+  if (d._kilde === 'ASG') {
+    visASGSelskabValg(d);
+    return;
+  }
+
+  // Find eksisterende sag KUN via stel eller aftalenr
+  // regnr bruges IKKE — kan skifte og er ikke unik
   var match = null;
-  if (d.stel) match = cases.find(function(c){ return c.stel && c.stel.trim().toUpperCase() === d.stel.trim().toUpperCase(); });
-  if (!match && d.regnr) match = cases.find(function(c){ return c.regnr && c.regnr.replace(/\s/g,'').toUpperCase() === d.regnr.replace(/\s/g,'').toUpperCase(); });
+  if (d.stel && d.stel.length > 5) {
+    match = cases.find(function(c){ return c.stel && c.stel.trim().toUpperCase() === d.stel.trim().toUpperCase(); });
+  }
   if (!match && d.aftalenr) {
     var dAft = d.aftalenr.trim().replace(/^T/i,'');
     match = cases.find(function(c){
@@ -2919,34 +3726,23 @@ function behandlKroneData(d) {
       return c.aftalenr.trim().replace(/^T/i,'') === dAft;
     });
   }
-  // Fallback: kundenavn match
-  if (!match && d.kunde) {
-    var kn = d.kunde.trim().toLowerCase();
-    match = cases.find(function(c){
-      if (!c.kunde) return false;
-      var ek = c.kunde.trim().toLowerCase();
-      return ek === kn || ek.indexOf(kn) !== -1 || kn.indexOf(ek) !== -1;
-    });
-  }
 
   if (match) {
-    // Sag fundet — opdater med nye data
+    // Sag fundet — gem ID så appen husker den ved næste load
+    localStorage.setItem('sl_last_krone_id', match.id);
     setActive(match.id);
     injectKroneData(d);
     showKroneDataBanner('Sag fundet og opdateret: ' + (match.kunde || match.sagnr || match.aftalenr), 'green');
   } else {
-    // Ingen sag fundet — spørg om oprettelse
-    var msg = 'Ingen eksisterende sag fundet for:\n' +
-      (d.kunde ? 'Kunde: ' + d.kunde + '\n' : '') +
-      (d.bilmodel ? 'Bil: ' + d.bilmodel + '\n' : '') +
-      (d.stel ? 'Stel: ' + d.stel + '\n' : '') +
-      '\nOpret ny sag?';
-    if (confirm(msg)) {
-      var c = blankCase();
-      cases.unshift(c);
-      save(); renderSidebar(); setActive(c.id);
-      setTimeout(function(){ injectKroneData(d); }, 200);
-    }
+    // Ingen sag fundet — opret automatisk
+    var c = blankCase();
+    cases.unshift(c);
+    localStorage.setItem('sl_last_krone_id', c.id);
+    save(); renderSidebar(); setActive(c.id);
+    setTimeout(function(){
+      injectKroneData(d);
+      showKroneDataBanner('Ny sag oprettet: ' + (d.kunde || d.bilmodel || 'Ukendt'), 'green');
+    }, 200);
   }
   // Ryd pending
   localStorage.removeItem('sl_krone_pending');
@@ -2959,6 +3755,53 @@ function showKroneDataBanner(tekst, type) {
   document.body.appendChild(banner);
   setTimeout(function(){ banner.remove(); }, 3000);
 }
+
+// ── DROP FILER PÅ SAG ─────────────────────────────────────────────────────────
+function dropFilesOnSag(files) {
+  var c = activeCase();
+  if (!c) { showKroneDataBanner('Vælg en sag først', 'red'); return; }
+  if (!c.filer) c.filer = [];
+  var pending = files.length;
+  var added = 0;
+
+  Array.from(files).forEach(function(file) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var dataUrl = e.target.result;
+      // Advar hvis fil er over 3MB
+      if (dataUrl.length > 4000000) {
+        showKroneDataBanner('⚠️ ' + file.name + ' er stor (' + Math.round(file.size/1024) + ' KB) — gemmes, men kan fylde meget', 'amber');
+      }
+      c.filer.push({
+        name: file.name,
+        type: file.type,
+        size: file.size,
+        dataUrl: dataUrl,
+        tilfojet: new Date().toISOString()
+      });
+      added++;
+      pending--;
+      if (pending === 0) {
+        try {
+          save();
+        } catch(e2) {
+          showKroneDataBanner('Filen er for stor til at gemme lokalt — prøv en mindre fil', 'red');
+          c.filer.pop();
+          return;
+        }
+        renderMain();
+        // Scroll til filer-kort
+        setTimeout(function() {
+          var fc = document.getElementById('sag-filer-card');
+          if (fc) fc.scrollIntoView({behavior:'smooth', block:'nearest'});
+        }, 200);
+        showKroneDataBanner(added + ' fil' + (added !== 1 ? 'er' : '') + ' gemt på sagen ✓', 'green');
+      }
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function tilfoejFiler(files) {
   var c = activeCase(); if (!c) return;
   if (!c.filer) c.filer = [];
@@ -3019,28 +3862,88 @@ function showProvision() {
   modal.style.display = 'block';
   var content = el('provision-content');
   var saelger = currentUser ? currentUser.username : null;
+  var now = new Date();
+  var thisMonth = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+
+  // Alle sager der tilhører sælgeren
   var sagsList = cases.filter(function(c) {
     return c.createdBy === saelger || c.updatedBy === saelger || !c.createdBy;
   });
-  var totalNetto = 0;
-  var rows = sagsList.map(function(c) {
-    var netto = calcNetto(c);
-    totalNetto += netto;
-    var minProvPct = parseFloat(c.minProvPct || 40);
-    var minProv = netto * minProvPct / 100;
-    var nettoColor = netto > 0 ? 'color:var(--green-dark);' : netto < 0 ? 'color:var(--red-dark);' : 'color:var(--muted);';
-    return '<tr onclick="closeProvision();setActive(\'' + c.id + '\')" style="cursor:pointer;" onmouseover="this.style.background=\'#f5f5f0\'" onmouseout="this.style.background=\'\'">' +
-      '<td style="padding:8px 10px;font-size:13px;font-weight:500;">' + (c.kunde || '—') + '</td>' +
-      '<td style="padding:8px 10px;font-size:12px;color:var(--muted);">' + (c.sagnr || c.aftalenr || '—') + '</td>' +
-      '<td style="padding:8px 10px;font-size:12px;text-align:right;">' + (c.provFocus ? formatKr(parseFloat(c.provFocus)) : '—') + '</td>' +
-      '<td style="padding:8px 10px;font-size:12px;text-align:right;">' + (c.provSalg ? formatKr(parseFloat(c.provSalg)) : '—') + '</td>' +
-      '<td style="padding:8px 10px;font-size:12px;text-align:right;color:var(--red-dark);">' + (c.udgifter ? formatKr(parseFloat(c.udgifter)) : '—') + '</td>' +
-      '<td style="padding:8px 10px;font-size:13px;font-weight:600;text-align:right;' + nettoColor + '">' + formatKr(netto) + '</td>' +
-      '<td style="padding:8px 10px;font-size:12px;text-align:right;color:var(--green-dark);">' + formatKr(minProv) + ' <span style="color:var(--muted);font-weight:400;">(' + minProvPct + '%)</span></td>' +
-      '</tr>';
-  }).join('');
 
-  var totalColor = totalNetto > 0 ? 'color:var(--green-dark);' : 'color:var(--red-dark);';
+  // ── MÅNEDSOVERBLIK baseret på periodestart ────────────────────────────────
+  var monthBlocks = '';
+  var grand12Netto = 0;
+  var grand12Provision = 0;
+  var grand12Udg = 0;
+  var grand12Antal = 0;
+  var grand12ProvPct = sagsList.length ? parseFloat(sagsList[0].minProvPct||30) : 30;
+
+  for (var m = 11; m >= 0; m--) {
+    var d2 = new Date(now.getFullYear(), now.getMonth() - m, 1);
+    var mKey = d2.getFullYear() + '-' + String(d2.getMonth() + 1).padStart(2, '0');
+    var mLabel = d2.toLocaleDateString('da-DK', { month: 'long', year: 'numeric' });
+
+    // Sager med periodestart i denne måned
+    var mCases = sagsList.filter(function(c) {
+      return c.periodestart && c.periodestart.indexOf(mKey) === 0;
+    });
+
+    if (mCases.length === 0 && mKey !== thisMonth) continue;
+
+    var mNetto     = mCases.reduce(function(s,c){ return s + calcNetto(c); }, 0);
+    var mProvision = mCases.reduce(function(s,c){ return s + (parseFloat(c.provFocus)||0) + (parseFloat(c.provSalg)||0); }, 0);
+    var mUdg       = mCases.reduce(function(s,c){ return s + (parseFloat(c.udgifter)||0); }, 0);
+    grand12Netto     += mNetto;
+    grand12Provision += mProvision;
+    grand12Udg       += mUdg;
+    grand12Antal     += mCases.length;
+
+    var isThis = mKey === thisMonth;
+    var mRows = mCases.map(function(c) {
+      var netto = calcNetto(c);
+      var minPP = parseFloat(c.minProvPct || 30);
+      var loen = Math.round(netto * minPP / 100);
+      var nc = netto > 0 ? 'color:var(--green-dark);' : netto < 0 ? 'color:var(--red-dark);' : 'color:var(--muted);';
+      return '<tr onclick="closeProvision();setActive(\'' + c.id + '\')" style="cursor:pointer;" onmouseover="this.style.background=\'#f5f5f0\'" onmouseout="this.style.background=\'\'">' +
+        '<td style="padding:6px 10px;font-size:13px;font-weight:500;padding-left:24px;">' + (c.kunde || '—') + '</td>' +
+        '<td style="padding:6px 10px;font-size:11px;color:var(--muted);">' + (c.aftalenr || c.sagnr || '—') + '</td>' +
+        '<td style="padding:6px 10px;font-size:12px;text-align:right;' + nc + '">' + formatKr(netto) + '</td>' +
+        '<td style="padding:6px 10px;font-size:13px;font-weight:700;text-align:right;color:var(--green-dark);">' + formatKr(loen) + ' <span style="font-size:10px;font-weight:400;color:var(--muted);">(' + minPP + '%)</span></td>' +
+        '</tr>';
+    }).join('');
+
+    monthBlocks +=
+      '<tr style="background:' + (isThis ? '#f0faf5' : '#fafaf8') + ';border-top:2px solid ' + (isThis ? 'var(--green)' : 'var(--border)') + ';">' +
+        '<td colspan="4" style="padding:8px 10px;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+            '<span style="font-size:13px;font-weight:700;color:' + (isThis ? 'var(--green-dark)' : '#333') + ';">' + mLabel + (isThis ? ' ●' : '') + '</span>' +
+            '<div style="display:flex;gap:16px;font-size:12px;">' +
+              '<span style="color:var(--muted);">' + mCases.length + ' sag' + (mCases.length !== 1 ? 'er' : '') + '</span>' +
+              '<span style="font-weight:600;color:' + (mNetto >= 0 ? 'var(--green-dark)' : 'var(--red-dark)') + ';">Samlet: ' + formatKr(mNetto) + '</span>' +
+              '<span style="font-weight:700;color:var(--green-dark);">Min l\u00f8n: ' + formatKr(Math.round(mNetto * (mCases.length ? parseFloat(mCases[0].minProvPct||30) : 30) / 100)) + '</span>' +
+            '</div>' +
+          '</div>' +
+        '</td>' +
+      '</tr>' +
+      mRows;
+  }
+
+  // ── 12 MÅ. TOTAL ─────────────────────────────────────────────────────────
+  var totalColor = grand12Netto >= 0 ? 'color:var(--green-dark);' : 'color:var(--red-dark);';
+  var totalBlock =
+    '<tr style="background:var(--green-light);border-top:2px solid var(--green);">' +
+      '<td colspan="4" style="padding:10px 10px;">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">' +
+          '<span style="font-size:13px;font-weight:700;color:var(--green-dark);">Total — 12 måneder · ' + grand12Antal + ' sager</span>' +
+          '<div style="display:flex;gap:16px;font-size:12px;flex-wrap:wrap;">' +
+            '<span style="color:var(--muted);">Udgifter: -' + formatKr(grand12Udg) + '</span>' +
+            '<span style="font-weight:600;' + totalColor + '">Samlet: ' + formatKr(grand12Netto) + '</span>' +
+            '<span style="font-size:15px;font-weight:700;color:var(--green-dark);">Min l\u00f8n: ' + formatKr(Math.round(grand12Netto * grand12ProvPct / 100)) + ' <span style="font-size:11px;font-weight:400;color:var(--green-dark);opacity:0.7;">(' + grand12ProvPct + '%)</span></span>' +
+          '</div>' +
+        '</div>' +
+      '</td>' +
+    '</tr>';
+
   content.innerHTML = sagsList.length === 0
     ? '<div style="color:var(--muted);font-size:13px;padding:1rem 0;">Ingen sager endnu</div>'
     : '<div style="overflow-x:auto;">' +
@@ -3048,17 +3951,11 @@ function showProvision() {
       '<thead><tr style="border-bottom:1.5px solid var(--border);">' +
       '<th style="padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);text-align:left;font-weight:600;">Kunde</th>' +
       '<th style="padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);text-align:left;font-weight:600;">Sag</th>' +
-      '<th style="padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);text-align:right;font-weight:600;">Provision</th>' +
-      '<th style="padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);text-align:right;font-weight:600;">Salg</th>' +
-      '<th style="padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);text-align:right;font-weight:600;">Udgifter</th>' +
-      '<th style="padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);text-align:right;font-weight:600;">Netto</th>' +
-      '<th style="padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);text-align:right;font-weight:600;">Min prov.</th>' +
+      '<th style="padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);text-align:right;font-weight:600;">Samlet indtjening</th>' +
+      '<th style="padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);text-align:right;font-weight:600;">Min l\u00f8n</th>' +
       '</tr></thead>' +
-      '<tbody>' + rows + '</tbody>' +
-      '<tfoot><tr style="border-top:1.5px solid var(--border);background:#fafaf8;">' +
-      '<td colspan="5" style="padding:10px 10px;font-size:12px;font-weight:600;">Total (' + sagsList.length + ' sager)</td>' +
-      '<td style="padding:10px 10px;font-size:15px;font-weight:700;text-align:right;' + totalColor + '">' + formatKr(totalNetto) + '</td>' +
-      '<td></td></tr></tfoot>' +
+      '<tbody>' + monthBlocks + '</tbody>' +
+      '<tfoot>' + totalBlock + '</tfoot>' +
       '</table></div>';
 }
 function closeProvision() { el('provision-modal').style.display = 'none'; }
@@ -3079,6 +3976,8 @@ function switchImportTab(tab) {
   if (tab === 'pdf') {
     var saved = localStorage.getItem('sl_api_key');
     if (saved) el('pdf-api-key').value = saved;
+    var savedMotor = localStorage.getItem('sl_motorapi_key');
+    if (savedMotor) el('motorapi-key').value = savedMotor;
   }
 }
 
@@ -3253,11 +4152,12 @@ function handlePDFFile(file) {
       status.innerHTML = '<span style="color:var(--red);">Safari blokerer API-kaldet fra lokal fil. Ring til Rasmus p\u00e5 +45 44 91 19 11 for hj\u00e6lp.</span>';
     }, 10000);
 
-    fetch('https://api.anthropic.com/v1/messages', {
+    fetch('/api/claude', {
       method: 'POST',
       signal: controller.signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        api_key: apiKey,
         model: 'claude-opus-4-6',
         max_tokens: 1024,
         messages: [{
@@ -3411,9 +4311,10 @@ function parseMobileDe() {
   }
   var status = el('mde-status');
   if (status) status.textContent = 'L\u00e6ser mobile.de data...';
-  fetch('https://api.anthropic.com/v1/messages', {
+  fetch('/api/claude', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({
+      api_key: apiKey,
       model: 'claude-sonnet-4-6',
       max_tokens: 512,
       messages: [{role:'user', content: 'Udtræk følgende fra denne mobile.de annoncetekst og svar KUN med JSON:\n{"pris_eur":"","pris_dkk":"","km":"","stel":"","reg_dato":"","maerke":"","model":"","braendstof":""}\n\npris_eur = pris uden moms (net/excl. VAT) i EUR som tal uden punktum/komma\npris_dkk = pris i DKK hvis angivet, ellers tom\nkm = kilometerstand som tal\nstel = stelnummer/VIN\nreg_dato = første registrering (YYYY-MM format)\nmaerke = bilmærke\nmodel = model\nbraendstof = benzin/diesel/el/hybrid\n\nTekst:\n' + tekst.substring(0, 3000)}]
@@ -3587,12 +4488,19 @@ function handleKroneFil(file) {
   reader.readAsArrayBuffer(file);
 }
 
+function rydKronePreview() {
+  _kroneRows = [];
+  _kroneSelected = new Set();
+  var p = el('krone-preview'); if(p) p.innerHTML = '';
+}
+
 function renderKronePreview() {
   var now = new Date();
   var html = '<div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
     '<button class="btn btn-primary" onclick="importKrone()">Importer valgte (' + _kroneSelected.size + ')</button>' +
     '<button class="btn" onclick="_kroneSelected=new Set(_kroneRows.map(function(r,i){return i;}));renderKronePreview()">Vælg alle</button>' +
     '<button class="btn" onclick="_kroneSelected=new Set();renderKronePreview()">Fravælg alle</button>' +
+    '<button class="btn" onclick="rydKronePreview()" style="background:var(--red-light);color:var(--red-dark);border-color:var(--red);">Ryd</button>' +
     '<span style="font-size:12px;color:var(--muted);">' + _kroneRows.length + ' kontrakter fundet</span>' +
     '</div>' +
     '<div class="import-table-wrap"><table class="import-table">' +
@@ -3809,7 +4717,7 @@ function importUdlob() {
   // Tilføj — men kun hvis sagen ikke allerede eksisterer
   var added = 0, updated = 0;
   toAdd.forEach(function(c) {
-    // Find eksisterende sag via stel, aftalenr eller kundenavn+bilmodel
+    // Find eksisterende sag KUN via stel eller aftalenr — ALDRIG kundenavn
     var existing = null;
     if (c.stel && c.stel.length > 5) {
       existing = cases.find(function(e){ return e.stel && e.stel.trim().toUpperCase() === c.stel.trim().toUpperCase(); });
@@ -3817,14 +4725,6 @@ function importUdlob() {
     if (!existing && c.aftalenr) {
       var af = c.aftalenr.replace(/^T/i,'');
       existing = cases.find(function(e){ return e.aftalenr && e.aftalenr.replace(/^T/i,'') === af; });
-    }
-    if (!existing && c.kunde) {
-      var kn = c.kunde.trim().toLowerCase();
-      existing = cases.find(function(e){
-        if (!e.kunde) return false;
-        var ek = e.kunde.trim().toLowerCase();
-        return ek === kn || ek.indexOf(kn) !== -1 || kn.indexOf(ek) !== -1;
-      });
     }
     if (existing) {
       // Opdater kun udløbsdato og periode hvis de er tomme
@@ -3848,7 +4748,6 @@ function importUdlob() {
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
 (function() {
-  // Check login first
   var stored = localStorage.getItem('sl_current_user');
   if (stored) {
     try {
@@ -3857,11 +4756,102 @@ function importUdlob() {
       showApp();
       loadCases();
       startKroneLytter();
+      return; // auto-logget ind — vis ikke login-skærm
     } catch(e) {}
   }
+  // Ikke logget ind — vis login
   el('login-screen').style.display = 'flex';
   el('app-screen').style.display = 'none';
 })();
 </script>
+
+<!-- ADM FORLÆNGELSE MODAL -->
+<div id="adm-forlang-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:2000;display:none;align-items:center;justify-content:center;font-family:Georgia,serif;">
+  <div style="background:#fff;border-radius:12px;padding:28px;max-width:420px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+      <span style="font-size:18px;font-weight:600;color:#1a1a18;">ADM Forlængelse</span>
+      <button onclick="document.getElementById('adm-forlang-modal').style.display='none'" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;">×</button>
+    </div>
+    <p style="font-size:13px;color:#666;margin:0 0 16px;">Kort forlængelse uden ny kontrakt. Kun forsikring faktureres ekstra.</p>
+    <div style="margin-bottom:16px;">
+      <label style="font-size:13px;font-weight:600;color:#333;display:block;margin-bottom:6px;">Antal måneder</label>
+      <div style="display:flex;gap:8px;">
+        <button onclick="valgAdmMdr(1)" id="adm-mdr-1" style="flex:1;padding:10px;border:2px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;font-size:15px;font-weight:600;">1 mdr.</button>
+        <button onclick="valgAdmMdr(2)" id="adm-mdr-2" style="flex:1;padding:10px;border:2px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;font-size:15px;font-weight:600;">2 mdr.</button>
+        <button onclick="valgAdmMdr(3)" id="adm-mdr-3" style="flex:1;padding:10px;border:2px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;font-size:15px;font-weight:600;">3 mdr.</button>
+      </div>
+    </div>
+    <div id="adm-forlang-preview" style="background:#f8f8f6;border-radius:8px;padding:14px;margin-bottom:16px;display:none;">
+      <div style="font-size:12px;color:#888;margin-bottom:8px;">Overblik</div>
+      <div id="adm-forlang-preview-content"></div>
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button onclick="document.getElementById('adm-forlang-modal').style.display='none'" style="flex:1;padding:10px;border:1px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;font-size:13px;">Annuller</button>
+      <button id="adm-forlang-ok" onclick="bekræftAdmForlang()" style="flex:2;padding:10px;border:none;border-radius:8px;background:#F59E0B;color:#7C4A00;cursor:pointer;font-size:13px;font-weight:600;display:none;">Opret ADM Forlængelse</button>
+    </div>
+  </div>
+</div>
+
+<!-- FORSIKRING OVERSIGT MODAL -->
+<div id="forsikring-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;overflow-y:auto;padding:2rem;">
+  <div style="background:#fff;border-radius:12px;max-width:580px;margin:0 auto;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+    <div style="background:#1a1a18;border-radius:12px 12px 0 0;padding:1rem 1.5rem;display:flex;justify-content:space-between;align-items:center;">
+      <div style="font-size:18px;color:#fff;">Forsikring &mdash; K&oslash;bst&aelig;dernes</div>
+      <button onclick="closeForsikringOversigt()" style="background:rgba(255,255,255,0.1);border:none;color:#fff;padding:6px 14px;border-radius:var(--radius);cursor:pointer;font-size:13px;font-family:Georgia,serif;">Luk</button>
+    </div>
+    <div style="padding:1.5rem;" id="forsikring-content"></div>
+  </div>
+</div>
+
+<script>
+function showForsikringOversigt() {
+  var modal = el('forsikring-modal');
+  modal.style.display = 'block';
+  renderForsikringOversigt();
+}
+function closeForsikringOversigt() {
+  el('forsikring-modal').style.display = 'none';
+}
+function renderForsikringOversigt() {
+  var div = el('forsikring-content');
+  var rows = FORSIKRING_SATSER.map(function(s, i) {
+    var stilstand = Math.round(s.aars * 0.5);
+    return '<tr style="border-bottom:1px solid var(--border);">' +
+      '<td style="padding:10px 12px;font-size:13px;">' + s.label + '</td>' +
+      '<td style="padding:10px 12px;text-align:right;">' +
+        '<input type="number" value="' + s.aars + '" style="width:88px;text-align:right;font-size:13px;font-weight:600;border:1.5px solid var(--green);border-radius:6px;padding:4px 8px;" ' +
+        'data-idx="' + i + '" onchange="opdaterForsikringSats(parseInt(this.dataset.idx),parseInt(this.value))">' +
+        ' <span style="font-size:11px;color:var(--muted);">kr/\u00e5r</span>' +
+      '</td>' +
+      '<td style="padding:10px 12px;text-align:right;font-size:12px;color:var(--muted);">' + formatKr(stilstand) + ' kr</td>' +
+      '<td style="padding:10px 12px;text-align:right;font-size:12px;color:var(--muted);">' + formatKr(Math.round(s.aars/12)) + '/mdr</td>' +
+    '</tr>';
+  }).join('');
+  div.innerHTML =
+    '<p style="font-size:12px;color:var(--muted);margin:0 0 12px;">Ret priserne hvis de er forkerte. De opdateres straks p\u00e5 alle sager.</p>' +
+    '<table style="width:100%;border-collapse:collapse;">' +
+    '<thead><tr style="background:#fafaf8;border-bottom:2px solid var(--border);">' +
+    '<th style="padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);text-align:left;">Bilens pris</th>' +
+    '<th style="padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);text-align:right;">\u00c5rsbeløb</th>' +
+    '<th style="padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);text-align:right;">Stilstand 50%</th>' +
+    '<th style="padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);text-align:right;">Per m\u00e5ned</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>' +
+    '<div style="margin-top:14px;padding:10px 14px;background:#FFF3E0;border-radius:8px;font-size:12px;color:#7C4A00;">' +
+    '<strong>Stilstand</strong> = 50% af \u00e5rsbeløbet, derefter omregnet til perioden.' +
+    '</div>';
+}
+function opdaterForsikringSats(idx, val) {
+  if (!val || val <= 0) return;
+  FORSIKRING_SATSER[idx].aars = val;
+  cases.forEach(function(c) {
+    if (!c.checks || !c.checks['r6'] || !c.pris) return;
+    var erStilstand = c.aftaletyper && c.aftaletyper.indexOf('Stilstand') !== -1;
+    c.notes['r6'] = calcForsikring(c.pris, c.periode, erStilstand);
+  });
+  save();
+  renderForsikringOversigt();
+  var c = activeCase();
+  if (c && c.checks && c.checks['r6']) rerenderChecklist();
+}
+</script>
 </body>
-</html>
