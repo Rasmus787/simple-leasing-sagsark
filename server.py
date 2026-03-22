@@ -28,12 +28,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 req = urllib.request.Request(url, headers={
                     'User-Agent': 'Mozilla/5.0',
                     'Accept': 'text/html,application/xhtml+xml',
-                    'Cookie': ''  # Session cookie fra browser kan ikke overføres
+                    'Cookie': ''  # Session cookie fra browser kan ikke overfÃ¸res
                 })
                 # Returner instruktion om at bruge Claude i Chrome i stedet
                 result = json.dumps({
                     'error': 'Brug knappen i Claude i Chrome til at hente data direkte fra Krone Connect mens du er logget ind',
-                    'hint': 'Åbn sagen på Krone Connect i Chrome, og bed Claude om at hente data'
+                    'hint': 'Ãbn sagen pÃ¥ Krone Connect i Chrome, og bed Claude om at hente data'
                 })
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
@@ -139,6 +139,55 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        elif self.path == '/api/makeapp':
+            try:
+                import os, subprocess, shutil
+                base = os.path.dirname(os.path.abspath(__file__))
+                app = os.path.join(base, 'SL Sagsark.app')
+                macos = os.path.join(app, 'Contents', 'MacOS')
+                res   = os.path.join(app, 'Contents', 'Resources')
+                subprocess.run(['rm','-rf',app])
+                os.makedirs(macos, exist_ok=True)
+                os.makedirs(res,   exist_ok=True)
+                exe = os.path.join(macos, 'SL Sagsark')
+                with open(exe,'w') as f:
+                    f.write('#!/bin/bash\nD=\"'+base+'\"\npkill -f \'python3 server.py\' 2>/dev/null\nsleep 1\ncd \"$D\" && python3 server.py >/tmp/sl.log 2>&1 &\nfor i in $(seq 10); do sleep 1; curl -s http://localhost:8765 >/dev/null && break; done\npgrep -f \"chrome.*localhost:8765\" >/dev/null && osascript -e \'tell app \"Google Chrome\" to activate\' || open -a \"Google Chrome\" --args --app=http://localhost:8765 --no-first-run\n')
+                os.chmod(exe, 0o755)
+                with open(os.path.join(app,'Contents','Info.plist'),'w') as f:
+                    f.write('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>CFBundleExecutable</key><string>SL Sagsark</string>\n<key>CFBundleIdentifier</key><string>dk.simpleleasing.sagsark</string>\n<key>CFBundleName</key><string>SL Sagsark</string>\n<key>CFBundleDisplayName</key><string>SL Sagsark</string>\n<key>CFBundlePackageType</key><string>APPL</string>\n<key>CFBundleIconFile</key><string>AppIcon</string>\n<key>CFBundleVersion</key><string>1.0</string>\n<key>NSHighResolutionCapable</key><true/>\n</dict></plist>')
+                try:
+                    from PIL import Image, ImageDraw, ImageFont
+                    def mk(s):
+                        i=Image.new('RGBA',(s,s),(0,0,0,0)); d=ImageDraw.Draw(i)
+                        d.rounded_rectangle([0,0,s-1,s-1],radius=int(s*.22),fill=(26,26,46,255))
+                        p=int(s*.055); d.rounded_rectangle([p,p,s-p-1,s-p-1],radius=int(s*.17),fill=(22,33,62,255))
+                        fs=int(s*.44); font=None
+                        for fp in ['/System/Library/Fonts/Supplemental/Georgia Bold.ttf','/System/Library/Fonts/Helvetica.ttc']:
+                            try: font=ImageFont.truetype(fp,fs); break
+                            except: pass
+                        font=font or ImageFont.load_default()
+                        bb=d.textbbox((0,0),'SL',font=font)
+                        d.text(((s-(bb[2]-bb[0]))//2-bb[0],int(s*.1)-bb[1]),'SL',fill=(255,255,255,255),font=font)
+                        ly=int(s*.73); lh=max(2,int(s*.014)); lp=int(s*.16)
+                        d.rounded_rectangle([lp,ly,s-lp,ly+lh],radius=lh//2,fill=(79,195,247,185))
+                        return i
+                    mk(1024).save('/tmp/sl1024.png')
+                    IS='/tmp/SLIs.iconset'; subprocess.run(['mkdir','-p',IS])
+                    for sz in [16,32,64,128,256,512,1024]:
+                        subprocess.run(['sips','-z',str(sz),str(sz),'/tmp/sl1024.png','--out',f'{IS}/icon_{sz}x{sz}.png'],capture_output=True)
+                    for a,b in [('32','16@2x'),('64','32@2x'),('256','128@2x'),('512','256@2x'),('512','512@2x')]:
+                        try: shutil.copy(f'{IS}/icon_{a}x{a}.png',f'{IS}/icon_{b}.png')
+                        except: pass
+                    subprocess.run(['iconutil','-c','icns',IS,'-o',os.path.join(res,'AppIcon.icns')],capture_output=True)
+                    subprocess.run(['rm','-rf',IS])
+                except: pass
+                subprocess.run(['xattr','-cr',app],capture_output=True)
+                subprocess.run(['killall','Dock'],capture_output=True)
+                send_json({'ok':True,'msg':'App lavet i '+base})
+            except Exception as e:
+                send_json({'error':str(e)},500)
+
         else:
             self.send_response(404)
             self.end_headers()
